@@ -20,12 +20,20 @@ MODEL_CONNECTOR_TOKEN=<your token> python3 <the downloaded file> \
   --relay https://<your relay>
 ```
 
-From a checkout of this repository, the same program runs as:
+In production, keep the token in your secrets manager and hand the
+connector the command that reads it - the token is consulted only when a
+session is established, then traded for a short-lived session token and
+dropped (see `docs/session-tokens-spec.md`):
 
 ```bash
-MODEL_CONNECTOR_TOKEN=<your token> python3 -m model_connector \
-  --relay https://<your relay>
+python3 <the downloaded file> --relay https://<your relay> \
+  --token-command "<your secrets manager CLI printing the token>"
 ```
+
+From a checkout of this repository, the same program runs as
+`python3 -m model_connector` with the same flags; the
+`MODEL_CONNECTOR_TOKEN` environment variable remains as the development
+fallback.
 
 Python 3.12 or newer. A signed container image with a software bill of
 materials is also published, for machines without Python.

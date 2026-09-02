@@ -42,21 +42,114 @@ def test_model_url_refusal_is_a_result_not_an_exit():
     assert refusal is not None and "http(s)" in refusal
 
 
-def test_token_from_env_then_file_then_dies(tmp_path):
-    os.environ[loop.TOKEN_ENV] = "tok-abc"
+def _client(post, source=lambda: "tok"):
+    c = client.RelayClient("https://r", source, post=post)
+    c.establish()
+    return c
+
+
+def _session_post(inner):
+    """Wrap a poll/result stub with a session endpoint answering 'sess-1'."""
+
+    def post(url, body, headers, timeout, **kw):
+        if url.endswith("/connector/session"):
+            return 200, {"session_token": "sess-1", "ttl_seconds": 3600}
+        return inner(url, body, headers, timeout, **kw)
+
+    return post
+
+
+def test_token_sources_command_file_env(tmp_path):
+    # Command: stdout stripped is the token; a failure carries the CLI's own
+    # words; consulted per call, so rotation needs no restart.
+    assert loop.make_token_source("printf ' tok-cmd \n'", None)() == "tok-cmd"
     try:
-        assert loop.load_token(None) == "tok-abc"
+        loop.make_token_source("echo nope >&2; exit 3", None)()
+        raise AssertionError("a failing command must raise TokenSourceError")
+    except loop.TokenSourceError as e:
+        assert "3" in str(e) and "nope" in str(e)
+    try:
+        loop.make_token_source("true", None)()
+        raise AssertionError("an empty stdout must raise")
+    except loop.TokenSourceError as e:
+        assert "nothing" in str(e)
+
+    # File: re-read per call - a rotated file is picked up with no restart.
+    tf = tmp_path / "tok"
+    tf.write_text("first\n", encoding="utf-8")
+    src = loop.make_token_source(None, str(tf))
+    assert src() == "first"
+    tf.write_text("rotated\n", encoding="utf-8")
+    assert src() == "rotated"
+
+    # Env: the development fallback, read fresh; absent names the production
+    # pattern first.
+    src = loop.make_token_source(None, None)
+    os.environ[loop.TOKEN_ENV] = "tok-env"
+    try:
+        assert src() == "tok-env"
     finally:
         del os.environ[loop.TOKEN_ENV]
-    tf = tmp_path / "tok"
-    tf.write_text("tok-file\n", encoding="utf-8")
-    assert loop.load_token(str(tf)) == "tok-file"
-    for bad in (None, str(tmp_path / "missing")):
-        try:
-            loop.load_token(bad)
-            raise AssertionError("a missing token must die with exit 2")
-        except SystemExit as e:
-            assert e.code == 2
+    try:
+        src()
+        raise AssertionError("no source must raise")
+    except loop.TokenSourceError as e:
+        assert "--token-command" in str(e)
+
+
+def test_establish_uses_the_pairing_token_once_and_keeps_only_the_session():
+    seen = {"auth": []}
+
+    def post(url, body, headers, timeout, **kw):
+        seen["auth"].append(headers["Authorization"])
+        if url.endswith("/connector/session"):
+            return 200, {"session_token": "sess-9", "ttl_seconds": 3600}
+        return 200, {"job": None}
+
+    calls = {"n": 0}
+
+    def source():
+        calls["n"] += 1
+        return "pairing-tok"
+
+    c = client.RelayClient("https://r", source, post=post)
+    c.establish()
+    c.poll({"protocol": 2})
+    assert seen["auth"][0] == "Bearer pairing-tok"
+    assert seen["auth"][1] == "Bearer sess-9"
+    assert calls["n"] == 1
+    # The pairing token is retained nowhere on the client.
+    assert "pairing-tok" not in repr(vars(c))
+
+
+def test_session_expiry_reestablishes_and_revocation_stops():
+    minted = {"n": 0}
+
+    def post(url, body, headers, timeout, **kw):
+        if url.endswith("/connector/session"):
+            minted["n"] += 1
+            return 200, {"session_token": f"sess-{minted['n']}", "ttl_seconds": 3600}
+        if headers["Authorization"] == "Bearer sess-1":
+            return 401, {"error": {"code": "session_expired"}}
+        return 200, {"job": None}
+
+    c = client.RelayClient("https://r", lambda: "tok", post=post)
+    c.establish()
+    try:
+        c.poll({"protocol": 2})
+        raise AssertionError("an expired session must raise SessionExpired")
+    except client.SessionExpired:
+        pass
+    c.establish()
+    assert c.poll({"protocol": 2}) is None  # sess-2 serves
+
+    try:
+        client.RelayClient(
+            "https://r", lambda: "tok", post=lambda *a, **k: (401, {"error": {"code": "pairing_revoked"}})
+        ).establish()
+        raise AssertionError("a revoked pairing must raise TokenRejected")
+    except client.TokenRejected:
+        pass
 
 
 def test_poll_shapes_token_rejection_and_protocol_mismatch():
@@ -66,26 +159,20 @@ def test_poll_shapes_token_rejection_and_protocol_mismatch():
         calls.append((url, body, headers))
         return 200, {"job": {"job_id": "j1", "payload": {"model": "m"}}}
 
-    c = client.RelayClient("https://r", "tok", post=post)
-    job = c.poll({"protocol": 1, "concurrency": 1, "served_models": []})
+    c = _client(_session_post(post))
+    job = c.poll({"protocol": 2, "concurrency": 1, "served_models": []})
     assert job == {"job_id": "j1", "payload": {"model": "m"}}
-    assert calls[0][2]["Authorization"] == "Bearer tok"
+    assert calls[0][2]["Authorization"] == "Bearer sess-1"
     assert calls[0][0] == "https://r/connector/poll"
 
-    try:
-        client.RelayClient("https://r", "bad", post=lambda *a, **k: (401, {})).poll({"protocol": 1})
-        raise AssertionError("401 must raise TokenRejected")
-    except client.TokenRejected:
-        pass
-
     def post426(url, body, headers, timeout, **kw):
-        return 426, {"error": {"message": "relay speaks protocol 2, connector spoke 1"}}
+        return 426, {"error": {"message": "relay speaks protocol 3, connector spoke 2"}}
 
     try:
-        client.RelayClient("https://r", "tok", post=post426).poll({"protocol": 1})
+        client.RelayClient("https://r", lambda: "tok", post=post426).establish()
         raise AssertionError("426 must raise ProtocolMismatch")
     except client.ProtocolMismatch as e:
-        assert "protocol 2" in str(e)
+        assert "protocol 3" in str(e)
 
 
 def test_serve_once_calls_the_jobs_own_address_and_posts_result():
@@ -104,7 +191,7 @@ def test_serve_once_calls_the_jobs_own_address_and_posts_result():
         assert payload == {"p": 1}
         return {"choices": [{"message": {"content": "hi"}}]}
 
-    rc = loop.serve(client.RelayClient("https://r", "tok", post=post), 1, once=True, call=fake_model)
+    rc = loop.serve(_client(_session_post(post)), 1, once=True, call=fake_model)
     assert rc == 0
     assert seen["result_url"] == "https://r/connector/result/j9"
     assert "choices" in seen["result_body"]
@@ -123,7 +210,7 @@ def test_an_unsanctioned_address_answers_typed_and_the_loop_lives_on():
         results.append((url, body))
         return 200, {}
 
-    c = client.RelayClient("https://r", "tok", post=post)
+    c = _client(_session_post(post))
     loop.serve(c, 1, once=True, call=lambda u, p: {"choices": []})
     loop.serve(c, 1, once=True, call=lambda u, p: {"choices": []})
     assert results[0][0].endswith("/j1") and "--allow-plain-http-model-url" in str(results[0][1])
@@ -137,13 +224,13 @@ def test_serve_stops_on_stop_event_revocation_and_protocol_mismatch():
         stop.set()
         return 200, {"job": None}
 
-    assert loop.serve(client.RelayClient("https://r", "tok", post=post_stop), 1, stop=stop) == 0
-    assert loop.serve(client.RelayClient("https://r", "t", post=lambda *a, **k: (401, {})), 1) == 2
+    assert loop.serve(_client(_session_post(post_stop)), 1, stop=stop) == 0
+    assert loop.serve(_client(_session_post(lambda *a, **k: (401, {}))), 1) == 2
 
     def post426(url, body, headers, timeout, **kw):
-        return 426, {"error": {"message": "relay speaks protocol 2, connector spoke 1"}}
+        return 426, {"error": {"message": "relay speaks protocol 3, connector spoke 2"}}
 
-    assert loop.serve(client.RelayClient("https://r", "t", post=post426), 1) == 2
+    assert loop.serve(_client(_session_post(post426)), 1) == 2
 
 
 def test_call_model_failures_become_typed_errors():

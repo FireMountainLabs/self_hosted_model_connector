@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -24,7 +25,7 @@ from urllib.parse import urlsplit
 from model_connector import client as client_mod
 from model_connector import tls
 
-PROTOCOL = 1
+PROTOCOL = 2
 TOKEN_ENV = "MODEL_CONNECTOR_TOKEN"  # noqa: S105 - the env var's NAME, not a secret
 _RETRY_SLEEP_SECS = 2.0
 
@@ -34,21 +35,69 @@ def _die(message: str) -> NoReturn:
     raise SystemExit(2)
 
 
-def load_token(token_file: str | None) -> str:
-    """The pairing token, from the environment or a file - never argv, where
-    every user on the machine could read it from the process list."""
-    env = (os.environ.get(TOKEN_ENV) or "").strip()
-    if env:
-        return env
+class TokenSourceError(RuntimeError):
+    """The token source could not produce a token right now. At startup this
+    is fatal (a misconfigured source deserves a sentence while the operator
+    is watching); mid-run it is a retry, because a briefly unreachable
+    secrets manager must not kill a connector a revocation would not have."""
+
+
+def make_token_source(command: str | None, token_file: str | None):
+    """The pairing token's source, consulted at every session establishment
+    and never cached - the credential's home is the secrets manager (or the
+    managed file), not this process. Precedence: command, then file, then
+    the environment variable (development only; the environment is exactly
+    where machine eyes look first). Never argv: every user on the machine
+    can read a process's arguments.
+
+    The command runs through the shell so manager pipelines work verbatim
+    (e.g. a CLI call piped through a JSON extractor); it is the operator's
+    own command on the operator's own machine. Its stdout, stripped, is the
+    token; its stderr is surfaced in the failure, because "exit 1" from a
+    manager CLI without its words is undiagnosable."""
+    if command:
+
+        def from_command() -> str:
+            try:
+                proc = subprocess.run(  # noqa: S602 - the operator's own command, by design
+                    command, shell=True, capture_output=True, text=True, timeout=30
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise TokenSourceError(f"the token command timed out: {exc}") from exc
+            if proc.returncode != 0:
+                detail = (proc.stderr or proc.stdout or "").strip()[:300]
+                raise TokenSourceError(
+                    f"the token command exited {proc.returncode}: {detail or 'no output'}"
+                )
+            token = proc.stdout.strip()
+            if not token:
+                raise TokenSourceError("the token command printed nothing")
+            return token
+
+        return from_command
     if token_file:
-        try:
-            content = open(token_file, encoding="utf-8").read().strip()
-        except OSError as exc:
-            _die(f"could not read the token file: {exc}")
-        if content:
+
+        def from_file() -> str:
+            try:
+                content = open(token_file, encoding="utf-8").read().strip()
+            except OSError as exc:
+                raise TokenSourceError(f"could not read the token file: {exc}") from exc
+            if not content:
+                raise TokenSourceError(f"the token file {token_file!r} is empty")
             return content
-        _die(f"the token file {token_file!r} is empty")
-    _die(f"no pairing token: set {TOKEN_ENV} or pass --token-file")
+
+        return from_file
+
+    def from_env() -> str:
+        env = (os.environ.get(TOKEN_ENV) or "").strip()
+        if not env:
+            raise TokenSourceError(
+                f"no pairing token: pass --token-command (a secrets manager CLI - the "
+                f"production pattern), --token-file, or set {TOKEN_ENV} (development)"
+            )
+        return env
+
+    return from_env
 
 
 def egress_facts(relay: str) -> str:
@@ -187,6 +236,27 @@ def serve(
         while not stop.is_set():
             try:
                 one_cycle()
+            except client_mod.SessionExpired:
+                # Expiry, or a relay restart - a non-event by design: consult
+                # the source, establish again. A source failure here is a
+                # retry like any transport wobble (a Vault blip must not kill
+                # what a revocation would not have).
+                try:
+                    relay_client.establish()
+                except TokenSourceError as exc:
+                    print(f"model-connector: {exc}; retrying", file=sys.stderr)
+                    stop.wait(_RETRY_SLEEP_SECS)
+                except client_mod.TokenRejected:
+                    # Revocation surfacing at re-establishment must stop the
+                    # loop exactly like revocation surfacing anywhere else -
+                    # not kill this one worker thread quietly.
+                    print(
+                        "model-connector: the pairing was revoked; stopping "
+                        "(generate a new token in Settings to pair again)",
+                        file=sys.stderr,
+                    )
+                    exit_code["value"] = 2
+                    stop.set()
             except client_mod.TokenRejected:
                 print(
                     "model-connector: the pairing was revoked; stopping "

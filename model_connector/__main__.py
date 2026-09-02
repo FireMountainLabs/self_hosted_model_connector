@@ -18,8 +18,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--relay", required=True, help="your deployment's relay URL (https)")
     p.add_argument(
+        "--token-command",
+        help="a command whose stdout is the pairing token - your secrets "
+        "manager's CLI (the production pattern); consulted at each session "
+        "establishment, so rotation needs no restart",
+    )
+    p.add_argument(
         "--token-file",
-        help=f"file holding the pairing token (or set {loop.TOKEN_ENV})",
+        help=f"file holding the pairing token, re-read per establishment "
+        f"(or set {loop.TOKEN_ENV} - development only)",
     )
     p.add_argument(
         "--concurrency",
@@ -53,11 +60,23 @@ def main(argv: list[str] | None = None) -> int:
         # must not require the credential to connect.
         print(loop.egress_facts(args.relay))
         return 0
-    token = loop.load_token(args.token_file)
-    relay_client = client.RelayClient(args.relay, token)
+    source = loop.make_token_source(args.token_command, args.token_file)
+    relay_client = client.RelayClient(args.relay, source)
+    try:
+        # Establish the first session now, while the operator is watching: a
+        # misconfigured source or a dead pairing gets a sentence here, not a
+        # silent retry loop. The pairing token itself is handled inside the
+        # client for the length of the exchange and dropped.
+        relay_client.establish()
+    except loop.TokenSourceError as exc:
+        return loop._die(str(exc))
+    except client.TokenRejected:
+        return loop._die(
+            "the pairing token was not accepted - generate a new one in Settings and pair again"
+        )
     print(
-        f"model-connector: connected to {args.relay}; each request names the "
-        "model server set in Settings"
+        f"model-connector: session established with {args.relay}; each request "
+        "names the model server set in Settings"
     )
     return loop.serve(
         relay_client,
