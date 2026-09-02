@@ -1,7 +1,6 @@
 # Sessions, and pairing built for a secrets manager
 
-Status: designed, not yet implemented. The protocol version will move from
-1 to 2 when this lands.
+Status: implemented in v2.0.0 (protocol 2).
 
 ## Purpose
 
