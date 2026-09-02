@@ -61,15 +61,22 @@ def _session_post(inner):
 
 def test_token_sources_command_file_env(tmp_path):
     # Command: stdout stripped is the token; a failure carries the CLI's own
-    # words; consulted per call, so rotation needs no restart.
-    assert loop.make_token_source("printf ' tok-cmd \n'", None)() == "tok-cmd"
+    # words; consulted per call, so rotation needs no restart. The commands
+    # here are python one-liners so the same test runs on every OS the
+    # matrix does - a real operator writes their platform's own command.
+    import sys
+
+    py = f'"{sys.executable}" -c'
+    assert loop.make_token_source(f"{py} \"print(' tok-cmd ')\"", None)() == "tok-cmd"
     try:
-        loop.make_token_source("echo nope >&2; exit 3", None)()
+        loop.make_token_source(
+            f"{py} \"import sys; print('nope', file=sys.stderr); sys.exit(3)\"", None
+        )()
         raise AssertionError("a failing command must raise TokenSourceError")
     except loop.TokenSourceError as e:
         assert "3" in str(e) and "nope" in str(e)
     try:
-        loop.make_token_source("true", None)()
+        loop.make_token_source(f"{py} \"pass\"", None)()
         raise AssertionError("an empty stdout must raise")
     except loop.TokenSourceError as e:
         assert "nothing" in str(e)
