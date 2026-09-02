@@ -442,6 +442,70 @@ def test_print_egress_names_the_model_host_bound():
     assert "redirects are never followed" in text
 
 
+def test_tenant_is_pinned_across_establishments():
+    """The relay's session answer names its tenant; the connector pins the
+    first name and refuses a later move - a re-pointed relay address must
+    never silently change which deployment a running connector serves."""
+    tenants = ["acme", "acme", "other"]
+
+    def post(url, body, headers, timeout, **kw):
+        if url.endswith("/connector/session"):
+            return 200, {
+                "session_token": "s",
+                "ttl_seconds": 3600,
+                "tenant": tenants.pop(0),
+            }
+        return 200, {"job": None}
+
+    c = client.RelayClient("https://r", lambda: "tok", post=post)
+    c.establish()  # pins "acme"
+    c._drop_session()
+    c.establish()  # same tenant re-establishes fine
+    c._drop_session()
+    try:
+        c.establish()
+        raise AssertionError("a changed tenant must raise TenantChanged")
+    except client.TenantChanged as e:
+        assert "acme" in str(e) and "other" in str(e)
+
+
+def test_a_tenant_move_stops_the_serve_loop():
+    calls = {"n": 0}
+
+    def post(url, body, headers, timeout, **kw):
+        if url.endswith("/connector/session"):
+            calls["n"] += 1
+            return 200, {
+                "session_token": f"s{calls['n']}",
+                "ttl_seconds": 3600,
+                "tenant": "acme" if calls["n"] == 1 else "other",
+            }
+        # Every poll answers session_expired, forcing a re-establishment,
+        # which then answers the wrong tenant.
+        return 401, {"error": {"code": "session_expired"}}
+
+    c = client.RelayClient("https://r", lambda: "tok", post=post)
+    c.establish()
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        rc = loop.serve(c, 1)
+    assert rc == 2
+    assert "tenant" in err.getvalue()
+
+
+def test_a_relay_naming_no_tenant_stays_compatible():
+    def post(url, body, headers, timeout, **kw):
+        if url.endswith("/connector/session"):
+            return 200, {"session_token": "s", "ttl_seconds": 3600}
+        return 200, {"job": None}
+
+    c = client.RelayClient("https://r", lambda: "tok", post=post)
+    c.establish()
+    c._drop_session()
+    c.establish()  # the empty name pins and re-pins without complaint
+    assert c.poll({"protocol": 2}) is None
+
+
 def test_stdlib_only_package():
     import model_connector
 

@@ -91,6 +91,18 @@ invalidates live ones within seconds.
    copies (the Authorization header) exist until garbage collection; the
    guarantee is that nothing retains one past the exchange.
 
+9. **The tenant is pinned for the life of the process.** The session
+   answer names the tenant the relay serves; the connector pins that name
+   at first establishment and stops - loudly, exit 2 - if a later
+   establishment answers a different one. A re-pointed relay address must
+   never silently move a running connector between deployments. The pin is
+   memory-only (the connector stores nothing), so re-pairing stays simple:
+   a new token for the same tenant works live with no restart, and moving
+   a box to a different tenant is a deliberate restart with that tenant's
+   relay and token. A relay that names no tenant (an older deployment)
+   pins the empty name, which keeps the connector compatible until the
+   fleet catches up.
+
 ## Rejected alternatives
 
 - **Keypair enrollment / proof-of-possession signing** - the Python
