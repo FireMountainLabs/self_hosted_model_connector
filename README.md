@@ -1,2 +1,53 @@
-# self_hosted_model_connector
-A self-hosted model connector: serves a model on your own network to your deployed tenant, dialing out only.
+# Self-hosted model connector
+
+Serves a model on your own network to your deployed tenant, **dialing out
+only** - nothing on your network ever accepts an incoming connection.
+
+This repository exists so that what runs on your machines is inspectable:
+it is the connector exactly as shipped, published in the open. It is plain
+Python with **no dependencies at all** - the standard library only - which
+you can verify by reading the five files in `model_connector/`.
+
+## Run it
+
+You normally don't clone this repository to run the connector: your
+deployment serves it as a single file, with a checksum, from the
+pairing-token page in its Settings. The command printed there is:
+
+```bash
+curl -fsSLO https://<your dashboard>/<the connector file named on your token page>
+MODEL_CONNECTOR_TOKEN=<your token> python3 <the downloaded file> \
+  --relay https://<your relay>
+```
+
+From a checkout of this repository, the same program runs as:
+
+```bash
+MODEL_CONNECTOR_TOKEN=<your token> python3 -m model_connector \
+  --relay https://<your relay>
+```
+
+Python 3.12 or newer. A signed container image with a software bill of
+materials is also published, for machines without Python.
+
+## What it does, and does not, do
+
+- **Dials out only.** The connector long-polls your deployment's relay over
+  HTTPS and forwards each request to the model server *you* named in your
+  deployment's Settings. It opens no ports and accepts no connections.
+- **Verifies encryption.** It refuses a relay connection that would not
+  carry AES-256, and refuses plain http to a model server on a different
+  machine unless you explicitly acknowledge it
+  (`--allow-plain-http-model-url`).
+- **Holds one secret, in the environment.** The pairing token rides
+  `MODEL_CONNECTOR_TOKEN` (or `--token-file`), never a command-line
+  argument - argv is readable by every user of the machine. Your deployment
+  stores only the token's SHA-256; revoking it in Settings stops the
+  connector on its next poll.
+- **Stores nothing.** Requests are forwarded and answered; nothing is
+  written to disk.
+
+## Reporting a problem
+
+Open an issue here, or use the reporting address shown on your
+deployment's Settings page.
