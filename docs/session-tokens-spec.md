@@ -84,9 +84,12 @@ invalidates live ones within seconds.
    with a sentence immediately - a misconfigured command deserves an
    answer while the operator is watching.
 
-8. **Memory hygiene is explicit.** The pairing token lives in a variable
-   scoped to the establishment call and is deleted after the exchange;
-   never logged, never stored, never placed back into the environment.
+8. **Memory hygiene means confinement, not erasure.** The pairing token
+   lives in a variable scoped to the establishment call: never logged,
+   never stored on the client, never placed back into the environment.
+   Python cannot guarantee that freed strings are zeroed, so transient
+   copies (the Authorization header) exist until garbage collection; the
+   guarantee is that nothing retains one past the exchange.
 
 ## Rejected alternatives
 

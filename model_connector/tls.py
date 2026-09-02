@@ -8,6 +8,12 @@ the connection and retry under a TLS 1.2 profile that can only produce
 AES-256. Data never moves over a lesser cipher
 - the encryption promise this connector makes is verified, not assumed.
 
+One consequence, accepted with eyes open: an active attacker who can break
+TLS 1.3 handshakes on the wire can steer every connection onto the 1.2
+retry profile. Confidentiality holds there too - certificates are still
+verified and only ECDHE AES-256-GCM suites are offered - but TLS 1.3's own
+downgrade protections do not apply to a connection that never reaches 1.3.
+
 Stdlib only: this file runs on whatever Python the tenant has.
 """
 
@@ -28,8 +34,26 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _MARKERS = ("AES_256_GCM", "AES256-GCM")
 
 
+# Generous for chat completions; the point is that a hostile peer cannot
+# make this process swallow an arbitrarily large body.
+MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+
+
 class Aes256Error(RuntimeError):
     """The transport could not guarantee AES-256; nothing was sent."""
+
+
+class OversizeResponse(RuntimeError):
+    """The peer answered with a body over MAX_RESPONSE_BYTES; dropped unread."""
+
+
+def read_capped(resp, cap: int | None = None) -> bytes:
+    """Read at most ``cap`` bytes; a longer body raises rather than growing."""
+    cap = MAX_RESPONSE_BYTES if cap is None else cap
+    raw = resp.read(cap + 1)
+    if len(raw) > cap:
+        raise OversizeResponse(f"the response body exceeded {cap} bytes")
+    return raw
 
 
 def is_aes256(cipher_name: str) -> bool:
@@ -133,7 +157,7 @@ def https_post_json(
             headers={"Content-Type": "application/json", **headers},
         )
         resp = conn.getresponse()
-        raw = resp.read()
+        raw = read_capped(resp)
         try:
             parsed = json.loads(raw) if raw else {}
         except ValueError:

@@ -47,6 +47,11 @@ materials is also published, for machines without Python.
   carry AES-256, and refuses plain http to a model server on a different
   machine unless you explicitly acknowledge it
   (`--allow-plain-http-model-url`).
+- **Forwards only where you allow.** Each request names the model server it
+  is aimed at (set in your deployment's Settings). Pass `--model-host`
+  (repeatable) and the connector refuses to forward anywhere else - your
+  bound on your network, independent of anything the deployment sends.
+  Redirects are never followed, and oversized responses are dropped unread.
 - **Holds one secret, in the environment.** The pairing token rides
   `MODEL_CONNECTOR_TOKEN` (or `--token-file`), never a command-line
   argument - argv is readable by every user of the machine. Your deployment

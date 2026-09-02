@@ -292,6 +292,156 @@ def test_print_egress_states_the_surface_without_a_token():
         assert e.code == 2
 
 
+def test_model_host_allowlist_bounds_forwarding():
+    # The operator's bound on where the process forwards, from argv only -
+    # a compromised platform must not gain a request-maker into the network.
+    allowed = frozenset({"model.internal"})
+    refusal = loop.model_url_refusal("https://other.internal/v1", False, allowed)
+    assert refusal is not None and "--model-host" in refusal and "other.internal" in refusal
+    assert loop.model_url_refusal("https://model.internal/v1", False, allowed) is None
+    assert loop.model_url_refusal("https://MODEL.internal/v1", False, allowed) is None
+    # An empty bound means the operator declined one; behavior is unchanged.
+    assert loop.model_url_refusal("https://anywhere.example/v1", False, frozenset()) is None
+
+
+def test_serve_refuses_a_job_outside_the_model_host_bound():
+    results = []
+
+    def post(url, body, headers, timeout, **kw):
+        if url.endswith("/connector/poll"):
+            return 200, {
+                "job": {"job_id": "j1", "payload": {}, "model_url": "https://evil.example/v1"}
+            }
+        results.append(body)
+        return 200, {}
+
+    c = _client(_session_post(post))
+    loop.serve(
+        c,
+        1,
+        once=True,
+        allowed_hosts=frozenset({"model.internal"}),
+        call=lambda u, p: (_ for _ in ()).throw(AssertionError("must not forward")),
+    )
+    assert "--model-host" in str(results[0])
+
+
+def test_redirects_are_never_followed():
+    # A probed service answering 302 must become a typed error, not a second
+    # request to a host nobody named.
+    import http.server
+
+    class Redirector(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.send_response(302)
+            self.send_header("Location", "http://127.0.0.1:9/elsewhere")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Redirector)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        out = loop.call_model(f"http://127.0.0.1:{srv.server_port}/v1", {"x": 1}, timeout=5)
+    finally:
+        srv.shutdown()
+    assert "302" in out["error"]["message"]
+
+
+def test_oversize_response_is_refused_unread():
+    from model_connector import tls
+
+    assert tls.read_capped(io.BytesIO(b"x" * 10), cap=10) == b"x" * 10
+    try:
+        tls.read_capped(io.BytesIO(b"x" * 11), cap=10)
+        raise AssertionError("an oversize body must raise")
+    except tls.OversizeResponse as e:
+        assert "exceeded" in str(e)
+
+
+def test_clean_strips_terminal_control_characters():
+    # Wire-originated text cannot rewrite the operator's terminal.
+    assert loop.clean("\x1b[2Jjob-1\r\x07") == " [2Jjob-1  "
+    assert loop.clean("plain\nline") == "plain\nline"
+    assert loop.clean("\x7f") == " "
+
+
+def test_world_readable_token_file_warns_once(tmp_path):
+    if os.name != "posix":
+        return  # no comparable mode bits to check on Windows
+    import sys
+
+    tf = tmp_path / "tok"
+    tf.write_text("t\n", encoding="utf-8")
+    tf.chmod(0o644)
+    src = loop.make_token_source(None, str(tf))
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        assert src() == "t"
+        assert src() == "t"
+    assert err.getvalue().count("readable by other accounts") == 1
+
+    tf.chmod(0o600)
+    err2 = io.StringIO()
+    with contextlib.redirect_stderr(err2):
+        assert loop.make_token_source(None, str(tf))() == "t"
+    assert err2.getvalue() == ""
+
+
+def test_result_delivery_survives_a_token_source_blip():
+    """The mid-delivery re-establishment retries through a briefly
+    unreachable secrets manager instead of dropping the job's answer."""
+    minted = {"n": 0}
+    delivered = []
+    source_calls = {"n": 0}
+
+    def source():
+        source_calls["n"] += 1
+        if source_calls["n"] == 2:  # the re-establishment's first attempt
+            raise loop.TokenSourceError("manager blinked")
+        return "tok"
+
+    def post(url, body, headers, timeout, **kw):
+        if url.endswith("/connector/session"):
+            minted["n"] += 1
+            return 200, {"session_token": f"sess-{minted['n']}", "ttl_seconds": 1}
+        if url.endswith("/connector/poll"):
+            return 200, {
+                "job": {"job_id": "j1", "payload": {}, "model_url": "http://127.0.0.1:8080/v1"}
+            }
+        if headers["Authorization"] == "Bearer sess-1":
+            return 401, {"error": {"code": "session_expired"}}
+        delivered.append(headers["Authorization"])
+        return 200, {}
+
+    c = client.RelayClient("https://r", source, post=post)
+    c.establish()
+    sleep = loop._RETRY_SLEEP_SECS
+    loop._RETRY_SLEEP_SECS = 0.01
+    try:
+        rc = loop.serve(c, 1, once=True, call=lambda u, p: {"choices": []})
+    finally:
+        loop._RETRY_SLEEP_SECS = sleep
+    assert rc == 0
+    assert delivered == ["Bearer sess-2"]
+    assert source_calls["n"] == 3
+
+
+def test_print_egress_names_the_model_host_bound():
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rc = main_mod.main(
+            ["--relay", "https://relay.example/x", "--print-egress", "--model-host", "M.internal"]
+        )
+    assert rc == 0
+    text = out.getvalue()
+    assert "m.internal only (--model-host)" in text
+    assert "redirects are never followed" in text
+
+
 def test_stdlib_only_package():
     import model_connector
 
