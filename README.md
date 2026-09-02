@@ -57,6 +57,12 @@ materials is also published, for machines without Python.
   argument - argv is readable by every user of the machine. Your deployment
   stores only the token's SHA-256; revoking it in Settings stops the
   connector on its next poll.
+- **Serves one tenant.** The session handshake names the tenant the relay
+  serves; the connector pins that name at first establishment and stops if
+  it ever changes. Moving a connector to a different deployment is a
+  deliberate restart, never something a re-pointed relay address can do to
+  a running process. (Re-pairing the same tenant with a new token needs no
+  restart - the token source is read fresh at every establishment.)
 - **Stores nothing.** Requests are forwarded and answered; nothing is
   written to disk.
 

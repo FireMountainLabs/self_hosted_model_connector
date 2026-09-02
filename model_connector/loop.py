@@ -340,6 +340,10 @@ def serve(
                     )
                     exit_code["value"] = 2
                     stop.set()
+                except client_mod.TenantChanged as exc:
+                    print(f"model-connector: {clean(exc)}; stopping", file=sys.stderr)
+                    exit_code["value"] = 2
+                    stop.set()
             except client_mod.TokenRejected:
                 print(
                     "model-connector: the pairing was revoked; stopping "
@@ -350,6 +354,12 @@ def serve(
                 stop.set()
             except client_mod.ProtocolMismatch as exc:
                 print(f"model-connector: {clean(exc)}; update the connector", file=sys.stderr)
+                exit_code["value"] = 2
+                stop.set()
+            except client_mod.TenantChanged as exc:
+                # A moved tenant is a stop wherever it surfaces - including
+                # the mid-delivery re-establishment - never a quiet retry.
+                print(f"model-connector: {clean(exc)}; stopping", file=sys.stderr)
                 exit_code["value"] = 2
                 stop.set()
             except Exception as exc:  # noqa: BLE001 - the loop outlives any one failure

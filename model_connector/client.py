@@ -36,6 +36,11 @@ class ProtocolMismatch(RuntimeError):
     """The relay speaks a different protocol major; upgrading is on a human."""
 
 
+class TenantChanged(RuntimeError):
+    """The relay now answers for a different tenant than the one this process
+    first paired with; only a deliberate restart may move a connector."""
+
+
 def _body_code(body: dict) -> str:
     return str((body.get("error") or {}).get("code") or "")
 
@@ -59,6 +64,11 @@ class RelayClient:
         self._timeout = timeout
         self._post = post
         self._session: str | None = None
+        # The tenant this process serves, pinned at first establishment and
+        # held in memory only: a connector may be moved to a different
+        # deployment by a restart, never by whatever its relay address
+        # resolves to today. None = never established.
+        self._tenant: str | None = None
         # One session serves every worker thread; establishment is serialized
         # so N threads hitting an expiry re-establish once, not N times.
         self._lock = threading.Lock()
@@ -94,6 +104,18 @@ class RelayClient:
             session = body.get("session_token")
             if not session:
                 raise RuntimeError("the relay answered without a session token")
+            # A relay that names no tenant (an older deployment) pins the
+            # empty name - the check still catches a later move to a relay
+            # that does name one.
+            tenant = str(body.get("tenant") or "")
+            if self._tenant is None:
+                self._tenant = tenant
+            elif tenant != self._tenant:
+                raise TenantChanged(
+                    f"this relay now answers for tenant {tenant or '(unnamed)'!r}, not "
+                    f"{self._tenant or '(unnamed)'!r} - a connector moves tenants only "
+                    "by a deliberate restart with that tenant's relay and token"
+                )
             self._session = str(session)
 
     def _drop_session(self) -> None:
