@@ -67,9 +67,11 @@ class RelayClient:
     def establish(self) -> None:
         """Trade the pairing token for a session token, under the lock.
 
-        The pairing token lives in one local name for the duration of the
-        exchange and is deleted after - never assigned to the object, never
-        logged (memory hygiene is a design decision, not an accident)."""
+        The pairing token is confined to this call: never assigned to the
+        object, never logged, and the local name is dropped after the
+        exchange. Confinement is the guarantee - Python cannot promise
+        erasure of freed strings, so transient copies (the Bearer header)
+        live until collection; what is promised is that nothing keeps one."""
         with self._lock:
             if self._session is not None:
                 return  # another worker already re-established

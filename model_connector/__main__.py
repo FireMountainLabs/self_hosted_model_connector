@@ -35,6 +35,15 @@ def main(argv: list[str] | None = None) -> int:
         help="how many requests at once your model server can take (default 1)",
     )
     p.add_argument(
+        "--model-host",
+        action="append",
+        default=[],
+        metavar="HOST",
+        help="only forward to this model server host (repeatable); requests "
+        "naming any other address are refused - your bound on where this "
+        "process will connect, independent of what the deployment sends",
+    )
+    p.add_argument(
         "--allow-plain-http-model-url",
         action="store_true",
         help="accept an unencrypted model server address on another machine "
@@ -53,12 +62,13 @@ def main(argv: list[str] | None = None) -> int:
     # server it is aimed at - set in the deployment's Settings beside the
     # model choice - so the model configuration lives in exactly one place.
     loop.validate_relay_url(args.relay)
+    allowed_hosts = frozenset(h.lower() for h in args.model_host if h)
     if args.print_egress:
         # The whole egress surface, stated by the process itself so a network
         # review can quote the tool rather than trust a document. Printed
         # before any token is loaded: describing where this would connect
         # must not require the credential to connect.
-        print(loop.egress_facts(args.relay))
+        print(loop.egress_facts(args.relay, allowed_hosts))
         return 0
     source = loop.make_token_source(args.token_command, args.token_file)
     relay_client = client.RelayClient(args.relay, source)
@@ -82,6 +92,7 @@ def main(argv: list[str] | None = None) -> int:
         relay_client,
         max(1, args.concurrency),
         allow_plain=args.allow_plain_http_model_url,
+        allowed_hosts=allowed_hosts,
         once=args.once,
     )
 

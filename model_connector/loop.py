@@ -29,6 +29,24 @@ PROTOCOL = 2
 TOKEN_ENV = "MODEL_CONNECTOR_TOKEN"  # noqa: S105 - the env var's NAME, not a secret
 _RETRY_SLEEP_SECS = 2.0
 
+# The relay is not allowed to steer this process through a redirect: a probed
+# service answering 302 must become a typed error, never a second request to
+# a host nobody named. Returning None makes the handler re-raise the 3xx as
+# the HTTPError the caller already turns into a typed result.
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirect)
+
+
+def clean(text: object) -> str:
+    """Text that originated on the wire, made safe for a terminal: a hostile
+    relay must not be able to rewrite what the operator sees (or spoof the
+    egress statement) with escape sequences."""
+    return "".join(ch if ch >= " " and ch != "\x7f" or ch == "\n" else " " for ch in str(text))
+
 
 def _die(message: str) -> NoReturn:
     print(f"model-connector: {message}", file=sys.stderr)
@@ -76,9 +94,22 @@ def make_token_source(command: str | None, token_file: str | None):
 
         return from_command
     if token_file:
+        warned = {"done": False}
 
         def from_file() -> str:
             try:
+                if os.name == "posix" and not warned["done"]:
+                    if os.stat(token_file).st_mode & 0o077:
+                        # A warning, not a refusal: only the operator can
+                        # judge their box, and Windows has no mode bits at
+                        # all - but a world-readable credential deserves a
+                        # sentence, the way SSH gives keys one.
+                        print(
+                            f"model-connector: warning: {token_file!r} is readable by "
+                            "other accounts on this machine (consider chmod 600)",
+                            file=sys.stderr,
+                        )
+                    warned["done"] = True
                 content = open(token_file, encoding="utf-8").read().strip()
             except OSError as exc:
                 raise TokenSourceError(f"could not read the token file: {exc}") from exc
@@ -100,20 +131,30 @@ def make_token_source(command: str | None, token_file: str | None):
     return from_env
 
 
-def egress_facts(relay: str) -> str:
+def egress_facts(relay: str, allowed_hosts: frozenset[str] = frozenset()) -> str:
     """Every destination this process will dial, in the process's own words -
     for the firewall reviewer who approves rules from statements, quoted
     from the tool that makes the connections."""
     r = urlsplit(relay)
     host = r.hostname or relay
     port = r.port or (443 if r.scheme == "https" else 80)
+    if allowed_hosts:
+        model_line = (
+            f"  and to: {', '.join(sorted(allowed_hosts))} only (--model-host) -\n"
+            "    requests naming any other model server are refused"
+        )
+    else:
+        model_line = (
+            "  and to: the model server address your deployment names per request -\n"
+            "    a machine on this network, set in your deployment's Settings\n"
+            "    (bound this with --model-host to refuse every other address)"
+        )
     return (
         "model-connector egress:\n"
         f"  dials out to: {host} port {port} over HTTPS (AES-256 verified per connection)\n"
-        "  and to: the model server address your deployment names per request -\n"
-        "    a machine on this network, set in your deployment's Settings\n"
+        f"{model_line}\n"
         "  listens on: nothing - this process opens no inbound sockets, ever\n"
-        "  no other destinations"
+        "  no other destinations, and redirects are never followed"
     )
 
 
@@ -125,7 +166,9 @@ def validate_relay_url(relay: str) -> None:
         _die(f"the relay URL must be https (got {relay!r})")
 
 
-def model_url_refusal(model_url: str, allow_plain: bool) -> str | None:
+def model_url_refusal(
+    model_url: str, allow_plain: bool, allowed_hosts: frozenset[str] = frozenset()
+) -> str | None:
     """None when the job's model server address is usable, else the refusal
     in plain words. A refusal is a per-job TYPED RESULT, never an exit: the
     address arrives from the deployment with each request (set in the
@@ -134,7 +177,14 @@ def model_url_refusal(model_url: str, allow_plain: bool) -> str | None:
     they may not be watching. The unencrypted-off-machine rule stays this
     side of the wire: only the box's
     operator can judge their own network, so the acknowledgment is theirs
-    (--allow-plain-http-model-url), never a Settings field."""
+    (--allow-plain-http-model-url), never a Settings field.
+
+    ``allowed_hosts`` is the operator's bound on where this process will
+    forward (--model-host, lowercased). The deployment names the address,
+    but the box's operator names the network: a compromised platform must
+    not gain a request-maker that can reach anything the box can. Empty
+    means the operator declined to bound it - the flag is the boundary, and
+    it lives in argv, never in anything the relay sends."""
     if not model_url:
         return (
             "the deployment did not name a model server for this request - set its "
@@ -143,6 +193,11 @@ def model_url_refusal(model_url: str, allow_plain: bool) -> str | None:
     m = urlsplit(model_url)
     if m.scheme not in ("http", "https"):
         return f"the model server address must be http(s) (got {model_url!r})"
+    if allowed_hosts and (m.hostname or "").lower() not in allowed_hosts:
+        return (
+            f"this connector only forwards to {', '.join(sorted(allowed_hosts))} "
+            f"(--model-host); the request named {m.hostname!r}"
+        )
     if m.scheme == "http" and (m.hostname or "") not in tls.LOOPBACK_HOSTS and not allow_plain:
         return (
             f"plain http to {m.hostname!r} would send documents across your network "
@@ -162,11 +217,19 @@ def call_model(model_url: str, payload: dict, timeout: float = 290.0) -> dict:
         headers={"Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - as above
-            return json.loads(resp.read())
+        with _opener.open(req, timeout=timeout) as resp:  # noqa: S310 - as above; never redirects
+            return json.loads(tls.read_capped(resp))
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")[:300]
+        # Reading the error body is itself a network read and can fail (a
+        # peer that resets after its status line); the typed error stands
+        # with or without the detail.
+        try:
+            detail = exc.read(4096).decode("utf-8", "replace")[:300]
+        except OSError:
+            detail = ""
         return {"error": {"message": f"the model server answered HTTP {exc.code}: {detail}"}}
+    except tls.OversizeResponse as exc:
+        return {"error": {"message": str(exc)}}
     except Exception as exc:  # noqa: BLE001 - any failure becomes the typed error the relay forwards
         return {"error": {"message": f"could not reach the model server: {exc}"[:300]}}
 
@@ -187,10 +250,10 @@ def _served_models(model_url: str) -> list[str]:
     if not model_url:
         return []
     try:
-        with urllib.request.urlopen(  # noqa: S310 - scheme constrained by validate_urls
+        with _opener.open(  # noqa: S310 - scheme constrained by validate_urls; never redirects
             model_url.rstrip("/") + "/models", timeout=5
         ) as resp:
-            data = json.loads(resp.read())
+            data = json.loads(tls.read_capped(resp))
         return [str(m.get("id")) for m in data.get("data", []) if m.get("id")][:20]
     except Exception:  # noqa: BLE001 - best-effort read; empty is a fine declaration
         return []
@@ -201,6 +264,7 @@ def serve(
     concurrency: int,
     *,
     allow_plain: bool = False,
+    allowed_hosts: frozenset[str] = frozenset(),
     once: bool = False,
     call=call_model,
     stop: threading.Event | None = None,
@@ -222,9 +286,9 @@ def serve(
     def one_cycle() -> None:
         job = relay_client.poll(_declare(concurrency, last_url["value"]))
         if job:
-            print(f"model-connector: serving job {job['job_id']}")
+            print(f"model-connector: serving job {clean(job['job_id'])}")
             url = str(job.get("model_url") or "")
-            refusal = model_url_refusal(url, allow_plain)
+            refusal = model_url_refusal(url, allow_plain, allowed_hosts)
             if refusal:
                 answer = {"error": {"message": refusal}}
             else:
@@ -235,11 +299,21 @@ def serve(
             except client_mod.SessionExpired:
                 # A session can age out DURING a held poll or a long model
                 # call; the job was legitimately claimed and its answer must
-                # not be dropped for that. Establish once and retry - a
+                # not be dropped for that - not for the expiry, and not for a
+                # secrets manager that blinks during the re-establishment
+                # either. Retry the establishment on the usual backoff until
+                # it lands (or the pairing is revoked, which propagates); a
                 # second expiry inside one delivery is not a clock, it is a
                 # revocation-shaped problem, and propagates as such.
-                relay_client.establish()
-                relay_client.result(job["job_id"], answer)
+                while not stop.is_set():
+                    try:
+                        relay_client.establish()
+                        break
+                    except TokenSourceError as exc:
+                        print(f"model-connector: {clean(exc)}; retrying", file=sys.stderr)
+                        stop.wait(_RETRY_SLEEP_SECS)
+                if not stop.is_set():
+                    relay_client.result(job["job_id"], answer)
 
     def loop_forever() -> None:
         while not stop.is_set():
@@ -253,7 +327,7 @@ def serve(
                 try:
                     relay_client.establish()
                 except TokenSourceError as exc:
-                    print(f"model-connector: {exc}; retrying", file=sys.stderr)
+                    print(f"model-connector: {clean(exc)}; retrying", file=sys.stderr)
                     stop.wait(_RETRY_SLEEP_SECS)
                 except client_mod.TokenRejected:
                     # Revocation surfacing at re-establishment must stop the
@@ -275,11 +349,11 @@ def serve(
                 exit_code["value"] = 2
                 stop.set()
             except client_mod.ProtocolMismatch as exc:
-                print(f"model-connector: {exc}; update the connector", file=sys.stderr)
+                print(f"model-connector: {clean(exc)}; update the connector", file=sys.stderr)
                 exit_code["value"] = 2
                 stop.set()
             except Exception as exc:  # noqa: BLE001 - the loop outlives any one failure
-                print(f"model-connector: transport hiccup ({exc}); retrying", file=sys.stderr)
+                print(f"model-connector: transport hiccup ({clean(exc)}); retrying", file=sys.stderr)
                 stop.wait(_RETRY_SLEEP_SECS)
 
     if once:
