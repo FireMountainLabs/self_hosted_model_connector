@@ -233,6 +233,33 @@ def test_serve_stops_on_stop_event_revocation_and_protocol_mismatch():
     assert loop.serve(_client(_session_post(post426)), 1) == 2
 
 
+def test_result_survives_a_session_that_expired_mid_job():
+    """A session ages out while the job is in flight: the answer is not
+    dropped - the loop establishes once and retries the delivery."""
+    minted = {"n": 0}
+    delivered = []
+
+    def post(url, body, headers, timeout, **kw):
+        if url.endswith("/connector/session"):
+            minted["n"] += 1
+            return 200, {"session_token": f"sess-{minted['n']}", "ttl_seconds": 1}
+        if url.endswith("/connector/poll"):
+            return 200, {
+                "job": {"job_id": "j1", "payload": {}, "model_url": "http://127.0.0.1:8080/v1"}
+            }
+        if headers["Authorization"] == "Bearer sess-1":
+            return 401, {"error": {"code": "session_expired"}}
+        delivered.append(headers["Authorization"])
+        return 200, {}
+
+    c = client.RelayClient("https://r", lambda: "tok", post=post)
+    c.establish()
+    rc = loop.serve(c, 1, once=True, call=lambda u, p: {"choices": []})
+    assert rc == 0
+    assert delivered == ["Bearer sess-2"]
+    assert minted["n"] == 2
+
+
 def test_call_model_failures_become_typed_errors():
     out = loop.call_model("http://127.0.0.1:1/v1", {"x": 1}, timeout=0.2)
     assert "error" in out and out["error"].get("message")

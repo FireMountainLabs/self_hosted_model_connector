@@ -230,7 +230,16 @@ def serve(
             else:
                 last_url["value"] = url
                 answer = call(url, job["payload"])
-            relay_client.result(job["job_id"], answer)
+            try:
+                relay_client.result(job["job_id"], answer)
+            except client_mod.SessionExpired:
+                # A session can age out DURING a held poll or a long model
+                # call; the job was legitimately claimed and its answer must
+                # not be dropped for that. Establish once and retry - a
+                # second expiry inside one delivery is not a clock, it is a
+                # revocation-shaped problem, and propagates as such.
+                relay_client.establish()
+                relay_client.result(job["job_id"], answer)
 
     def loop_forever() -> None:
         while not stop.is_set():
