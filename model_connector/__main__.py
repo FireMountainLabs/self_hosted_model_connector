@@ -34,6 +34,11 @@ def main(argv: list[str] | None = None) -> int:
         "(your network, your call)",
     )
     p.add_argument("--once", action="store_true", help="one poll cycle, then exit (smoke test)")
+    p.add_argument(
+        "--print-egress",
+        action="store_true",
+        help="print every network destination this process will dial, then exit",
+    )
     args = p.parse_args(argv)
 
     # There is deliberately no model URL here: the command establishes
@@ -41,6 +46,13 @@ def main(argv: list[str] | None = None) -> int:
     # server it is aimed at - set in the deployment's Settings beside the
     # model choice - so the model configuration lives in exactly one place.
     loop.validate_relay_url(args.relay)
+    if args.print_egress:
+        # The whole egress surface, stated by the process itself so a network
+        # review can quote the tool rather than trust a document. Printed
+        # before any token is loaded: describing where this would connect
+        # must not require the credential to connect.
+        print(loop.egress_facts(args.relay))
+        return 0
     token = loop.load_token(args.token_file)
     relay_client = client.RelayClient(args.relay, token)
     print(

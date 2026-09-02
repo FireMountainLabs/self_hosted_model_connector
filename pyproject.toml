@@ -1,0 +1,22 @@
+# The connector as an installable package: deployments that ship it pin this
+# repository at a commit, so what a tenant runs is verifiably this tree.
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "self-hosted-model-connector"
+version = "1.0.0"
+description = "Serve a model on your own network to your deployment, dialing out only."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+# No dependencies, and none will be added: the standard library only.
+# Auditability is the feature - five files, nothing transitive to vet.
+dependencies = []
+
+[project.scripts]
+model-connector = "model_connector.__main__:main"
+
+[tool.setuptools]
+packages = ["model_connector"]

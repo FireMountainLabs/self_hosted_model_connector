@@ -51,6 +51,23 @@ def load_token(token_file: str | None) -> str:
     _die(f"no pairing token: set {TOKEN_ENV} or pass --token-file")
 
 
+def egress_facts(relay: str) -> str:
+    """Every destination this process will dial, in the process's own words -
+    for the firewall reviewer who approves rules from statements, quoted
+    from the tool that makes the connections."""
+    r = urlsplit(relay)
+    host = r.hostname or relay
+    port = r.port or (443 if r.scheme == "https" else 80)
+    return (
+        "model-connector egress:\n"
+        f"  dials out to: {host} port {port} over HTTPS (AES-256 verified per connection)\n"
+        "  and to: the model server address your deployment names per request -\n"
+        "    a machine on this network, set in your deployment's Settings\n"
+        "  listens on: nothing - this process opens no inbound sockets, ever\n"
+        "  no other destinations"
+    )
+
+
 def validate_relay_url(relay: str) -> None:
     """Refuse a startup that would dial out unencrypted: everything that
     leaves this machine for the relay must ride TLS."""
