@@ -332,6 +332,43 @@ def test_call_model_failures_become_typed_errors():
     assert "error" in out and out["error"].get("message")
 
 
+def test_an_unreachable_relay_at_startup_is_one_sentence(monkeypatch, capsys):
+    # The first establishment runs while the operator watches: a relay that
+    # cannot be reached (DNS, network, firewall) or one that will not carry
+    # AES-256 must end in a sentence naming the address and the reason - the
+    # stack trace a bare socket error would print is not an answer.
+    monkeypatch.setenv(loop.TOKEN_ENV, "tok")
+
+    class Unreachable:
+        def __init__(self, relay, source):
+            pass
+
+        def establish(self):
+            raise OSError("nodename nor servname provided, or not known")
+
+    monkeypatch.setattr(main_mod.client, "RelayClient", Unreachable)
+    try:
+        main_mod.main(["--relay", "https://relay.invalid"])
+        raise AssertionError("an unreachable relay must exit")
+    except SystemExit as e:
+        assert e.code == 2
+    err = capsys.readouterr().err
+    assert "could not reach the relay at https://relay.invalid" in err
+    assert "nodename" in err and "Traceback" not in err
+
+    class WeakCipher(Unreachable):
+        def establish(self):
+            raise main_mod.tls.Aes256Error("the relay offered TLS_CHACHA20, not AES-256")
+
+    monkeypatch.setattr(main_mod.client, "RelayClient", WeakCipher)
+    try:
+        main_mod.main(["--relay", "https://relay.invalid"])
+        raise AssertionError("a weak cipher must exit")
+    except SystemExit as e:
+        assert e.code == 2
+    assert "not AES-256" in capsys.readouterr().err
+
+
 def test_print_egress_states_the_surface_without_a_token():
     # For the firewall reviewer: the process states every destination it
     # will dial and exits 0, before any token is loaded. A plain-http relay

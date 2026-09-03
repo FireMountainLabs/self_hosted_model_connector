@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import argparse
 
-from model_connector import client, loop
+from model_connector import client, loop, tls
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -86,6 +86,13 @@ def main(argv: list[str] | None = None) -> int:
         return loop._die(
             "the pairing token was not accepted - generate a new one in Settings and pair again"
         )
+    except tls.Aes256Error as exc:
+        return loop._die(str(exc))
+    except OSError as exc:
+        # A relay that cannot be reached at all - a mistyped address, no
+        # network, a firewall - is the operator's problem to fix, and gets
+        # the address and the OS's reason in one line, not a stack trace.
+        return loop._die(f"could not reach the relay at {args.relay}: {exc}")
     print(
         f"model-connector: session established with {args.relay}; each request "
         "names the model server set in Settings"
