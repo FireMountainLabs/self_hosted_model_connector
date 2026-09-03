@@ -1,6 +1,10 @@
 # Sessions, and pairing built for a secrets manager
 
-Status: implemented in v2.0.0 (protocol 2).
+Status: implemented in v2.0.0 (protocol 2). Decision 1's token sources were
+superseded in v3.0.0 by the stored pairing (`stored-pairing-spec.md`): the
+pasted token is the one source, remembered on the machine after the relay
+accepts it. Sessions, the two failure meanings, revocation, restart and the
+tenant pin (decisions 2 to 9) stand unchanged.
 
 ## Purpose
 

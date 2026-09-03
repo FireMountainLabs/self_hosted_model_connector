@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import json
 import getpass
-import os
-import subprocess
 import sys
 import threading
 import time
@@ -24,11 +22,17 @@ from typing import NoReturn
 from urllib.parse import urlsplit
 
 from model_connector import client as client_mod
-from model_connector import tls
+from model_connector import pairing, tls
 
 PROTOCOL = 2
-TOKEN_ENV = "MODEL_CONNECTOR_TOKEN"  # noqa: S105 - the env var's NAME, not a secret
 _RETRY_SLEEP_SECS = 2.0
+# How long a starting connector waits for a token's previous holder to go
+# quiet before giving up: the relay lets a token go about a minute after its
+# last poll, so a restart on the heels of a crash (a service manager's,
+# typically) pairs on its own, while a token genuinely in use elsewhere is
+# refused in plain words once the wait is up.
+_BUSY_RETRY_SECS = 75.0
+_BUSY_RETRY_STEP = 5.0
 
 # The relay is not allowed to steer this process through a redirect: a probed
 # service answering 302 must become a typed error, never a second request to
@@ -57,97 +61,65 @@ def _die(message: str) -> NoReturn:
 class TokenSourceError(RuntimeError):
     """The token source could not produce a token right now. At startup this
     is fatal (a misconfigured source deserves a sentence while the operator
-    is watching); mid-run it is a retry, because a briefly unreachable
-    secrets manager must not kill a connector a revocation would not have."""
+    is watching); mid-run it is a retry, because a source that cannot
+    answer this instant must not kill a connector a revocation would not have."""
 
 
-def make_token_source(command: str | None, token_file: str | None):
+class TokenSource:
     """The pairing token's source, consulted at every session establishment.
-    Precedence: command, then file, then the environment variable
-    (development only; the environment is exactly where machine eyes look
-    first), then - in a terminal - a hidden-input prompt. Never argv: every
-    user on the machine can read a process's arguments.
 
-    Command and file are read fresh each time and never cached: the
-    credential's home is the secrets manager (or the managed file), not
-    this process. The prompted token is the one exception - it is held in
-    this process's memory for as long as it runs, because a session must be
-    re-established every hour and a person cannot be asked hourly. It goes
-    nowhere else: not to disk, not to the environment. A restart asks again.
+    The stored token wins: a machine that paired once needs no person at a
+    restart. Otherwise, in a terminal, the token is asked for once with input
+    hidden and held in memory - never argv, where every user of the machine
+    can read it, and never the environment, which is where machine eyes look
+    first. Without a terminal and without a stored token there is nothing to
+    do but say so: a service must never hang on a prompt nobody will see.
 
-    The command runs through the shell so manager pipelines work verbatim
-    (e.g. a CLI call piped through a JSON extractor); it is the operator's
-    own command on the operator's own machine. Its stdout, stripped, is the
-    token; its stderr is surfaced in the failure, because "exit 1" from a
-    manager CLI without its words is undiagnosable."""
-    if command:
+    A pasted token reaches disk only through ``remember()``, which the caller
+    invokes after the relay has accepted it - a mistyped paste must not be
+    remembered. ``forget()`` is the revocation path: the relay refused the
+    token, so it leaves memory and disk together."""
 
-        def from_command() -> str:
-            try:
-                proc = subprocess.run(  # noqa: S602 - the operator's own command, by design
-                    command, shell=True, capture_output=True, text=True, timeout=30
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise TokenSourceError(f"the token command timed out: {exc}") from exc
-            if proc.returncode != 0:
-                detail = (proc.stderr or proc.stdout or "").strip()[:300]
-                raise TokenSourceError(
-                    f"the token command exited {proc.returncode}: {detail or 'no output'}"
-                )
-            token = proc.stdout.strip()
-            if not token:
-                raise TokenSourceError("the token command printed nothing")
-            return token
+    def __init__(self, store: pairing.PairingStore) -> None:
+        self._store = store
+        self._token: str | None = store.load()
+        self.pasted = False
 
-        return from_command
-    if token_file:
-        warned = {"done": False}
-
-        def from_file() -> str:
-            try:
-                if os.name == "posix" and not warned["done"]:
-                    if os.stat(token_file).st_mode & 0o077:
-                        # A warning, not a refusal: only the operator can
-                        # judge their box, and Windows has no mode bits at
-                        # all - but a world-readable credential deserves a
-                        # sentence, the way SSH gives keys one.
-                        print(
-                            f"model-connector: warning: {token_file!r} is readable by "
-                            "other accounts on this machine (consider chmod 600)",
-                            file=sys.stderr,
-                        )
-                    warned["done"] = True
-                content = open(token_file, encoding="utf-8").read().strip()
-            except OSError as exc:
-                raise TokenSourceError(f"could not read the token file: {exc}") from exc
-            if not content:
-                raise TokenSourceError(f"the token file {token_file!r} is empty")
-            return content
-
-        return from_file
-
-    held = {"token": ""}
-
-    def from_env_or_prompt() -> str:
-        env = (os.environ.get(TOKEN_ENV) or "").strip()
-        if env:
-            return env
-        if held["token"]:
-            return held["token"]
+    def __call__(self) -> str:
+        if self._token:
+            return self._token
         if not _interactive():
             raise TokenSourceError(
-                "no pairing token: run this in a terminal and paste the token when asked, "
-                "or pass --token-command (a secrets manager CLI - the pattern for a "
-                f"connector that restarts on its own), --token-file, or set {TOKEN_ENV} "
-                "(development)"
+                "no pairing token: run this once in a terminal and paste the token when "
+                "asked - it is remembered on this machine afterwards, so a service needs "
+                "no prompt"
             )
         pasted = getpass.getpass("Paste the pairing token (input is hidden): ").strip()
         if not pasted:
             raise TokenSourceError("nothing was pasted")
-        held["token"] = pasted
+        self._token = pasted
+        self.pasted = True
         return pasted
 
-    return from_env_or_prompt
+    @property
+    def path(self) -> str:
+        """Where a remembered token lives, for the one line that tells the
+        operator so."""
+        return str(self._store.path)
+
+    def remember(self) -> None:
+        if self.pasted and self._token:
+            self._store.save(self._token)
+            self.pasted = False
+
+    def forget(self) -> None:
+        self._token = None
+        self.pasted = False
+        self._store.forget()
+
+
+def make_token_source(store: pairing.PairingStore) -> TokenSource:
+    return TokenSource(store)
 
 
 def _interactive() -> bool:
@@ -298,10 +270,13 @@ def serve(
     once: bool = False,
     call=call_model,
     stop: threading.Event | None = None,
+    on_revoked=None,
 ) -> int:
     """Run the poll loops; returns an exit code. `once` does a single poll
     cycle on one thread (the smoke-test flag); `stop` lets a supervisor (or
-    the contract suite) wind the loops down.
+    the contract suite) wind the loops down; `on_revoked` runs once when the
+    relay refuses the pairing token, before the loop stops - the stored
+    token's removal hangs off it.
 
     Each job names the model server it is aimed at: the address is
     set in the deployment's Settings beside the model choice, so the box
@@ -309,6 +284,22 @@ def serve(
     served-models declaration on later polls."""
     stop = stop or threading.Event()
     exit_code = {"value": 0}
+    revoked_once = {"done": False}
+
+    def revoked() -> None:
+        # Revocation must stop the loop exactly the same way wherever it
+        # surfaces - a poll, a re-establishment, a mid-delivery retry - and
+        # the hook runs once however many workers see it.
+        print(
+            "model-connector: the pairing was revoked; stopping "
+            "(generate a new token in Settings to pair again)",
+            file=sys.stderr,
+        )
+        if on_revoked is not None and not revoked_once["done"]:
+            revoked_once["done"] = True
+            on_revoked()
+        exit_code["value"] = 2
+        stop.set()
     # Written by whichever worker thread served last; a stale read only means
     # one declaration lists the previous server's models, corrected next poll.
     last_url = {"value": ""}
@@ -329,17 +320,18 @@ def serve(
             except client_mod.SessionExpired:
                 # A session can age out DURING a held poll or a long model
                 # call; the job was legitimately claimed and its answer must
-                # not be dropped for that - not for the expiry, and not for a
-                # secrets manager that blinks during the re-establishment
-                # either. Retry the establishment on the usual backoff until
-                # it lands (or the pairing is revoked, which propagates); a
-                # second expiry inside one delivery is not a clock, it is a
+                # not be dropped for that - not for the expiry, not for a
+                # token source that cannot answer this instant, and not for
+                # a relay still counting the old session as live. Retry the
+                # establishment on the usual backoff until it lands (or the
+                # pairing is revoked, which propagates); a second expiry
+                # inside one delivery is not a clock, it is a
                 # revocation-shaped problem, and propagates as such.
                 while not stop.is_set():
                     try:
                         relay_client.establish()
                         break
-                    except TokenSourceError as exc:
+                    except (TokenSourceError, client_mod.KeyBusy) as exc:
                         print(f"model-connector: {clean(exc)}; retrying", file=sys.stderr)
                         stop.wait(_RETRY_SLEEP_SECS)
                 if not stop.is_set():
@@ -356,32 +348,20 @@ def serve(
                 # what a revocation would not have).
                 try:
                     relay_client.establish()
-                except TokenSourceError as exc:
+                except (TokenSourceError, client_mod.KeyBusy) as exc:
+                    # A relay still counting the previous session as live is
+                    # the same class as a source that cannot answer this
+                    # instant: both clear on their own within the window.
                     print(f"model-connector: {clean(exc)}; retrying", file=sys.stderr)
                     stop.wait(_RETRY_SLEEP_SECS)
                 except client_mod.TokenRejected:
-                    # Revocation surfacing at re-establishment must stop the
-                    # loop exactly like revocation surfacing anywhere else -
-                    # not kill this one worker thread quietly.
-                    print(
-                        "model-connector: the pairing was revoked; stopping "
-                        "(generate a new token in Settings to pair again)",
-                        file=sys.stderr,
-                    )
-                    exit_code["value"] = 2
-                    stop.set()
+                    revoked()
                 except client_mod.TenantChanged as exc:
                     print(f"model-connector: {clean(exc)}; stopping", file=sys.stderr)
                     exit_code["value"] = 2
                     stop.set()
             except client_mod.TokenRejected:
-                print(
-                    "model-connector: the pairing was revoked; stopping "
-                    "(generate a new token in Settings to pair again)",
-                    file=sys.stderr,
-                )
-                exit_code["value"] = 2
-                stop.set()
+                revoked()
             except client_mod.ProtocolMismatch as exc:
                 print(f"model-connector: {clean(exc)}; update the connector", file=sys.stderr)
                 exit_code["value"] = 2

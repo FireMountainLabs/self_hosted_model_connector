@@ -7,8 +7,10 @@ when a pairing does not go green - and never the token.
 from __future__ import annotations
 
 import argparse
+import sys
+import time
 
-from model_connector import client, loop, tls
+from model_connector import client, loop, pairing, tls
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -17,19 +19,6 @@ def main(argv: list[str] | None = None) -> int:
         description="Serve your own model to your deployment, dialing out only.",
     )
     p.add_argument("--relay", required=True, help="your deployment's relay URL (https)")
-    p.add_argument(
-        "--token-command",
-        help="a command whose stdout is the pairing token - your secrets "
-        "manager's CLI, for a connector that restarts on its own; consulted "
-        "at each session establishment, so rotation needs no restart. "
-        "Without any token option, the token is asked for at a hidden "
-        "prompt and held in memory only",
-    )
-    p.add_argument(
-        "--token-file",
-        help=f"file holding the pairing token, re-read per establishment "
-        f"(or set {loop.TOKEN_ENV} - development only)",
-    )
     p.add_argument(
         "--concurrency",
         type=int,
@@ -72,19 +61,26 @@ def main(argv: list[str] | None = None) -> int:
         # must not require the credential to connect.
         print(loop.egress_facts(args.relay, allowed_hosts))
         return 0
-    source = loop.make_token_source(args.token_command, args.token_file)
+    source = loop.make_token_source(pairing.PairingStore(args.relay))
     relay_client = client.RelayClient(args.relay, source)
     try:
         # Establish the first session now, while the operator is watching: a
-        # misconfigured source or a dead pairing gets a sentence here, not a
-        # silent retry loop. The pairing token itself is handled inside the
-        # client for the length of the exchange and dropped.
-        relay_client.establish()
+        # dead pairing or a token in use elsewhere gets a sentence here, not
+        # a silent retry loop.
+        _establish_while_watching(relay_client)
     except loop.TokenSourceError as exc:
         return loop._die(str(exc))
     except client.TokenRejected:
+        # The token the relay just refused must not be offered again at the
+        # next start: a revoked pairing leaves this machine with it.
+        source.forget()
         return loop._die(
             "the pairing token was not accepted - generate a new one in Settings and pair again"
+        )
+    except client.KeyBusy:
+        return loop._die(
+            "another connector is already connected with this pairing token - each "
+            "connector needs its own: generate another in Settings"
         )
     except tls.Aes256Error as exc:
         return loop._die(str(exc))
@@ -93,6 +89,14 @@ def main(argv: list[str] | None = None) -> int:
         # network, a firewall - is the operator's problem to fix, and gets
         # the address and the OS's reason in one line, not a stack trace.
         return loop._die(f"could not reach the relay at {args.relay}: {exc}")
+    first_pairing = source.pasted
+    source.remember()
+    if first_pairing:
+        print(
+            "model-connector: paired; the token is remembered on this machine "
+            f"(owner-only file {source.path}), so this command needs no "
+            "paste from now on"
+        )
     print(
         f"model-connector: session established with {args.relay}; each request "
         "names the model server set in Settings"
@@ -103,7 +107,33 @@ def main(argv: list[str] | None = None) -> int:
         allow_plain=args.allow_plain_http_model_url,
         allowed_hosts=allowed_hosts,
         once=args.once,
+        on_revoked=source.forget,
     )
+
+
+def _establish_while_watching(relay_client) -> None:
+    """The first establishment, with the operator at the keyboard. A busy
+    answer is waited out for a bounded time - the relay lets a token go about
+    a minute after its previous holder's last poll, so a restart right after
+    a crash pairs on its own - and a token genuinely in use elsewhere is
+    refused after the wait, in plain words."""
+    deadline = time.monotonic() + loop._BUSY_RETRY_SECS
+    said = False
+    while True:
+        try:
+            relay_client.establish()
+            return
+        except client.KeyBusy:
+            if time.monotonic() >= deadline:
+                raise
+            if not said:
+                print(
+                    "model-connector: another connector is connected with this token; "
+                    "waiting for it to go quiet",
+                    file=sys.stderr,
+                )
+                said = True
+            time.sleep(loop._BUSY_RETRY_STEP)
 
 
 if __name__ == "__main__":

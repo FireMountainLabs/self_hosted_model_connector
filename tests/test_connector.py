@@ -1,6 +1,6 @@
 """The connector's promises, executed: refusals before insecure bytes, typed
-per-job errors instead of dead loops, one secret only ever in the
-environment, and nothing beyond the standard library. Run with
+per-job errors instead of dead loops, one secret - pasted once, then kept
+owner-only on this machine - and nothing beyond the standard library. Run with
 ``python -m pytest tests``; no test opens a real socket - transport is an
 injected callable."""
 
@@ -12,7 +12,7 @@ import os
 import threading
 
 from model_connector import __main__ as main_mod
-from model_connector import client, loop
+from model_connector import client, loop, pairing
 
 
 def test_plain_http_relay_refused():
@@ -57,95 +57,6 @@ def _session_post(inner):
         return inner(url, body, headers, timeout, **kw)
 
     return post
-
-
-def test_token_sources_command_file_env(tmp_path):
-    # Command: stdout stripped is the token; a failure carries the CLI's own
-    # words; consulted per call, so rotation needs no restart. The commands
-    # here are python one-liners so the same test runs on every OS the
-    # matrix does - a real operator writes their platform's own command.
-    import sys
-
-    py = f'"{sys.executable}" -c'
-    assert loop.make_token_source(f"{py} \"print(' tok-cmd ')\"", None)() == "tok-cmd"
-    try:
-        loop.make_token_source(
-            f"{py} \"import sys; print('nope', file=sys.stderr); sys.exit(3)\"", None
-        )()
-        raise AssertionError("a failing command must raise TokenSourceError")
-    except loop.TokenSourceError as e:
-        assert "3" in str(e) and "nope" in str(e)
-    try:
-        loop.make_token_source(f"{py} \"pass\"", None)()
-        raise AssertionError("an empty stdout must raise")
-    except loop.TokenSourceError as e:
-        assert "nothing" in str(e)
-
-    # File: re-read per call - a rotated file is picked up with no restart.
-    tf = tmp_path / "tok"
-    tf.write_text("first\n", encoding="utf-8")
-    src = loop.make_token_source(None, str(tf))
-    assert src() == "first"
-    tf.write_text("rotated\n", encoding="utf-8")
-    assert src() == "rotated"
-
-    # Env: the development fallback, read fresh; absent names the production
-    # pattern first.
-    src = loop.make_token_source(None, None)
-    os.environ[loop.TOKEN_ENV] = "tok-env"
-    try:
-        assert src() == "tok-env"
-    finally:
-        del os.environ[loop.TOKEN_ENV]
-    try:
-        src()
-        raise AssertionError("no source must raise")
-    except loop.TokenSourceError as e:
-        assert "--token-command" in str(e)
-
-
-def test_no_source_in_a_terminal_asks_once_and_holds_the_paste(monkeypatch):
-    # The copy-paste path: a person at a terminal is asked once, with input
-    # hidden, and the paste is held in memory for the hourly re-establishment
-    # - never written anywhere. Without a terminal there is no prompt: the
-    # sources are named and the process exits, so a service never hangs on a
-    # prompt nobody will see.
-    monkeypatch.delenv(loop.TOKEN_ENV, raising=False)
-    asked = []
-
-    def fake_getpass(prompt):
-        asked.append(prompt)
-        return "  pasted-tok \n"
-
-    monkeypatch.setattr(loop.getpass, "getpass", fake_getpass)
-    monkeypatch.setattr(loop, "_interactive", lambda: True)
-    src = loop.make_token_source(None, None)
-    assert src() == "pasted-tok"
-    assert src() == "pasted-tok"
-    assert len(asked) == 1 and "hidden" in asked[0]
-    # The environment still wins when set - the development shortcut is not
-    # silently replaced by a prompt.
-    monkeypatch.setenv(loop.TOKEN_ENV, "env-tok")
-    assert loop.make_token_source(None, None)() == "env-tok"
-    monkeypatch.delenv(loop.TOKEN_ENV)
-
-    monkeypatch.setattr(loop.getpass, "getpass", lambda prompt: "   ")
-    try:
-        loop.make_token_source(None, None)()
-        raise AssertionError("an empty paste must raise")
-    except loop.TokenSourceError as e:
-        assert "nothing was pasted" in str(e)
-
-    def never(prompt):
-        raise AssertionError("no prompt without a terminal")
-
-    monkeypatch.setattr(loop, "_interactive", lambda: False)
-    monkeypatch.setattr(loop.getpass, "getpass", never)
-    try:
-        loop.make_token_source(None, None)()
-        raise AssertionError("no terminal and no source must raise")
-    except loop.TokenSourceError as e:
-        assert "terminal" in str(e) and "--token-command" in str(e)
 
 
 def test_interactive_is_the_terminal_check(monkeypatch):
@@ -332,12 +243,13 @@ def test_call_model_failures_become_typed_errors():
     assert "error" in out and out["error"].get("message")
 
 
-def test_an_unreachable_relay_at_startup_is_one_sentence(monkeypatch, capsys):
+def test_an_unreachable_relay_at_startup_is_one_sentence(monkeypatch, capsys, tmp_path):
     # The first establishment runs while the operator watches: a relay that
     # cannot be reached (DNS, network, firewall) or one that will not carry
     # AES-256 must end in a sentence naming the address and the reason - the
     # stack trace a bare socket error would print is not an answer.
-    monkeypatch.setenv(loop.TOKEN_ENV, "tok")
+    monkeypatch.setattr(main_mod.pairing, "default_path", lambda: tmp_path / "p.json")
+    pairing.PairingStore("https://relay.invalid", path=tmp_path / "p.json").save("tok")
 
     class Unreachable:
         def __init__(self, relay, source):
@@ -466,31 +378,10 @@ def test_clean_strips_terminal_control_characters():
     assert loop.clean("\x7f") == " "
 
 
-def test_world_readable_token_file_warns_once(tmp_path):
-    if os.name != "posix":
-        return  # no comparable mode bits to check on Windows
-    import sys
-
-    tf = tmp_path / "tok"
-    tf.write_text("t\n", encoding="utf-8")
-    tf.chmod(0o644)
-    src = loop.make_token_source(None, str(tf))
-    err = io.StringIO()
-    with contextlib.redirect_stderr(err):
-        assert src() == "t"
-        assert src() == "t"
-    assert err.getvalue().count("readable by other accounts") == 1
-
-    tf.chmod(0o600)
-    err2 = io.StringIO()
-    with contextlib.redirect_stderr(err2):
-        assert loop.make_token_source(None, str(tf))() == "t"
-    assert err2.getvalue() == ""
-
-
 def test_result_delivery_survives_a_token_source_blip():
-    """The mid-delivery re-establishment retries through a briefly
-    unreachable secrets manager instead of dropping the job's answer."""
+    """The mid-delivery re-establishment retries through a token source that
+    cannot answer this instant (the source is an injected callable, so any
+    raise there is a retry) instead of dropping the job's answer."""
     minted = {"n": 0}
     delivered = []
     source_calls = {"n": 0}
@@ -613,3 +504,233 @@ def test_stdlib_only_package():
         src = open(os.path.join(pkg_dir, name), encoding="utf-8").read()
         for banned in ("fastapi", "requests", "httpx", "aiohttp", "pip"):
             assert f"import {banned}" not in src and f"from {banned}" not in src
+
+
+def test_stored_token_is_used_without_a_prompt(tmp_path, monkeypatch):
+    # A machine that paired once needs no person at a restart: the stored
+    # token is the source, and the prompt is never reached.
+    store = pairing.PairingStore("https://r", path=tmp_path / "p.json")
+    store.save("stored-tok")
+
+    def never(prompt):
+        raise AssertionError("no prompt with a stored token")
+
+    monkeypatch.setattr(loop.getpass, "getpass", never)
+    monkeypatch.setattr(loop, "_interactive", lambda: False)
+    src = loop.make_token_source(store)
+    assert src() == "stored-tok" and src.pasted is False
+
+
+def test_paste_once_then_remember_then_forget(tmp_path, monkeypatch):
+    # The copy-paste path: asked once, with input hidden, held in memory;
+    # written only when the caller says the relay accepted it; and gone from
+    # memory and disk together on revocation.
+    store = pairing.PairingStore("https://r", path=tmp_path / "p.json")
+    asked = []
+
+    def fake_getpass(prompt):
+        asked.append(prompt)
+        return "  pasted \n"
+
+    monkeypatch.setattr(loop.getpass, "getpass", fake_getpass)
+    monkeypatch.setattr(loop, "_interactive", lambda: True)
+    src = loop.make_token_source(store)
+    assert src() == "pasted" and src() == "pasted"
+    assert len(asked) == 1 and "hidden" in asked[0]
+    assert src.pasted is True
+    assert store.load() is None
+    src.remember()
+    assert store.load() == "pasted" and src.pasted is False
+    src.forget()
+    assert store.load() is None
+    assert src.pasted is False
+
+    monkeypatch.setattr(loop.getpass, "getpass", lambda prompt: "   ")
+    try:
+        loop.make_token_source(store)()
+        raise AssertionError("an empty paste must raise")
+    except loop.TokenSourceError as e:
+        assert "nothing was pasted" in str(e)
+
+    # Without a terminal and without a stored token there is no prompt: the
+    # way in is named and the process exits, so a service never hangs on a
+    # prompt nobody will see.
+    def never(prompt):
+        raise AssertionError("no prompt without a terminal")
+
+    monkeypatch.setattr(loop, "_interactive", lambda: False)
+    monkeypatch.setattr(loop.getpass, "getpass", never)
+    try:
+        loop.make_token_source(store)()
+        raise AssertionError("no terminal and nothing stored must raise")
+    except loop.TokenSourceError as e:
+        assert "terminal" in str(e) and "remembered" in str(e)
+
+
+def test_the_unattended_sources_are_gone():
+    # One way in: the paste. A command, a file or an environment variable
+    # would each be a second place for the credential to live.
+    for flag in ("--token-command", "--token-file"):
+        try:
+            main_mod.main(["--relay", "https://r", flag, "x"])
+            raise AssertionError(flag)
+        except SystemExit as e:
+            assert e.code == 2
+    assert not hasattr(loop, "TOKEN_ENV")
+    src = open(loop.__file__, encoding="utf-8").read()
+    assert "subprocess" not in src and "MODEL_CONNECTOR_TOKEN" not in src
+
+
+def test_a_busy_token_is_typed_at_establishment():
+    def post(url, body, headers, timeout, **kw):
+        return 409, {"error": {"message": "another connector holds it", "code": "connector_busy"}}
+
+    c = client.RelayClient("https://r", lambda: "tok", post=post)
+    try:
+        c.establish()
+        raise AssertionError("409 must raise KeyBusy")
+    except client.KeyBusy as e:
+        assert "another connector" in str(e)
+
+
+def test_serve_forgets_the_pairing_on_revocation_once():
+    forgotten = []
+
+    def post(url, body, headers, timeout, **kw):
+        return 401, {"error": {"message": "no", "code": "pairing_revoked"}}
+
+    c = _client(_session_post(post))
+    rc = loop.serve(c, 2, on_revoked=lambda: forgotten.append(True))
+    assert rc == 2 and forgotten == [True]  # two workers, one forget
+
+
+def test_serve_retries_a_busy_reestablishment():
+    # Mid-run, a relay still counting the old session as live is a retry
+    # like any transport wobble - never a stop, never a forget.
+    minted = {"n": 0}
+    stop = threading.Event()
+
+    def post(url, body, headers, timeout, **kw):
+        if url.endswith("/connector/session"):
+            minted["n"] += 1
+            if minted["n"] == 2:
+                return 409, {"error": {"message": "busy", "code": "connector_busy"}}
+            return 200, {"session_token": f"sess-{minted['n']}", "ttl_seconds": 3600}
+        if headers["Authorization"] == "Bearer sess-1":
+            return 401, {"error": {"code": "session_expired"}}
+        stop.set()
+        return 200, {"job": None}
+
+    c = client.RelayClient("https://r", lambda: "tok", post=post)
+    c.establish()
+    forgotten = []
+    sleep = loop._RETRY_SLEEP_SECS
+    loop._RETRY_SLEEP_SECS = 0.01
+    try:
+        rc = loop.serve(c, 1, stop=stop, on_revoked=lambda: forgotten.append(True))
+    finally:
+        loop._RETRY_SLEEP_SECS = sleep
+    assert rc == 0 and forgotten == [] and minted["n"] == 3
+
+
+def test_startup_waits_out_a_busy_token_then_gives_up(monkeypatch, capsys, tmp_path):
+    p = tmp_path / "p.json"
+    pairing.PairingStore("https://relay.invalid", path=p).save("tok")
+    monkeypatch.setattr(main_mod.pairing, "default_path", lambda: p)
+    monkeypatch.setattr(loop, "_BUSY_RETRY_SECS", 0.2)
+    monkeypatch.setattr(loop, "_BUSY_RETRY_STEP", 0.05)
+    attempts = {"n": 0}
+
+    class Busy:
+        def __init__(self, relay, source):
+            pass
+
+        def establish(self):
+            attempts["n"] += 1
+            raise client.KeyBusy("another connector is already connected")
+
+    monkeypatch.setattr(main_mod.client, "RelayClient", Busy)
+    try:
+        main_mod.main(["--relay", "https://relay.invalid"])
+        raise AssertionError("a busy token must exit after the wait")
+    except SystemExit as e:
+        assert e.code == 2
+    err = capsys.readouterr().err
+    assert attempts["n"] >= 2
+    assert err.count("waiting for it to go quiet") == 1
+    assert "another connector" in err and "generate another" in err
+    # The token stays: busy is not revoked.
+    assert pairing.PairingStore("https://relay.invalid", path=p).load() == "tok"
+
+
+def test_startup_revocation_forgets_and_says_so(monkeypatch, capsys, tmp_path):
+    p = tmp_path / "p.json"
+    pairing.PairingStore("https://relay.invalid", path=p).save("tok")
+    monkeypatch.setattr(main_mod.pairing, "default_path", lambda: p)
+
+    class Revoked:
+        def __init__(self, relay, source):
+            pass
+
+        def establish(self):
+            raise client.TokenRejected("no")
+
+    monkeypatch.setattr(main_mod.client, "RelayClient", Revoked)
+    try:
+        main_mod.main(["--relay", "https://relay.invalid"])
+        raise AssertionError("a revoked token must exit")
+    except SystemExit as e:
+        assert e.code == 2
+    assert pairing.PairingStore("https://relay.invalid", path=p).load() is None
+    assert "generate a new one" in capsys.readouterr().err
+
+
+def test_a_first_run_remembers_after_the_relay_accepts(monkeypatch, capsys, tmp_path):
+    p = tmp_path / "p.json"
+    monkeypatch.setattr(main_mod.pairing, "default_path", lambda: p)
+    monkeypatch.setattr(loop, "_interactive", lambda: True)
+    monkeypatch.setattr(loop.getpass, "getpass", lambda prompt: "pasted")
+    served = {}
+
+    class Fine:
+        def __init__(self, relay, source):
+            self.source = source
+
+        def establish(self):
+            assert self.source() == "pasted"
+            if self.source.pasted:  # the first run: nothing on disk until acceptance
+                assert pairing.PairingStore("https://relay.invalid", path=p).load() is None
+
+    monkeypatch.setattr(main_mod.client, "RelayClient", Fine)
+
+    def fake_serve(relay_client, concurrency, **kw):
+        served["on_revoked"] = kw["on_revoked"]
+        return 0
+
+    monkeypatch.setattr(main_mod.loop, "serve", fake_serve)
+    assert main_mod.main(["--relay", "https://relay.invalid"]) == 0
+    assert pairing.PairingStore("https://relay.invalid", path=p).load() == "pasted"
+    out = capsys.readouterr().out
+    assert "remembered on this machine" in out and str(p) in out
+    assert "pasted" not in out
+    # The loop's revocation hook is the store's forget.
+    served["on_revoked"]()
+    assert pairing.PairingStore("https://relay.invalid", path=p).load() is None
+
+    # A second run: stored token, no prompt, no "remembered" line.
+    monkeypatch.setattr(loop.getpass, "getpass", lambda prompt: (_ for _ in ()).throw(AssertionError("prompted")))
+    pairing.PairingStore("https://relay.invalid", path=p).save("pasted")
+    assert main_mod.main(["--relay", "https://relay.invalid"]) == 0
+    assert "remembered" not in capsys.readouterr().out
+
+
+def test_no_terminal_and_no_stored_token_is_one_sentence(monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(main_mod.pairing, "default_path", lambda: tmp_path / "p.json")
+    monkeypatch.setattr(loop, "_interactive", lambda: False)
+    try:
+        main_mod.main(["--relay", "https://relay.invalid"])
+        raise AssertionError("no token must exit")
+    except SystemExit as e:
+        assert e.code == 2
+    err = capsys.readouterr().err
+    assert "terminal" in err and "Traceback" not in err

@@ -9,6 +9,8 @@ body codes are the protocol's grammar:
   relay restart); establish again. Raised as :class:`SessionExpired`.
 * 401 anywhere else - the pairing itself was refused; stop, do not hammer.
   Raised as :class:`TokenRejected`.
+* 409 at establishment, body code ``connector_busy`` - a live session already
+  holds this pairing token. Raised as :class:`KeyBusy`.
 * 426 - the relay speaks a protocol this connector does not; stop loudly,
   naming both versions. Raised as :class:`ProtocolMismatch`.
 
@@ -41,6 +43,13 @@ class TenantChanged(RuntimeError):
     first paired with; only a deliberate restart may move a connector."""
 
 
+class KeyBusy(RuntimeError):
+    """The relay already holds a live session on this pairing token. One
+    token serves one connector: the other holder is still polling, so this
+    one waits (a restart on a crash's heels) or stops (a second machine,
+    which needs its own token)."""
+
+
 def _body_code(body: dict) -> str:
     return str((body.get("error") or {}).get("code") or "")
 
@@ -56,7 +65,8 @@ class RelayClient:
         """``token_source`` is a zero-argument callable returning the pairing
         token; it is consulted at every session establishment and never
         between - the credential's home is wherever the source reads from
-        (a secrets manager, a file), not this object."""
+        (the stored pairing, or the operator's paste held in memory), not this
+        object."""
         self._relay = relay.rstrip("/")
         self._token_source = token_source
         # Above the relay's ~25s poll hold, so a held-then-empty poll is a
@@ -100,6 +110,11 @@ class RelayClient:
             if status == 426:
                 raise ProtocolMismatch(
                     (body.get("error") or {}).get("message") or "protocol version mismatch"
+                )
+            if status == 409:
+                raise KeyBusy(
+                    (body.get("error") or {}).get("message")
+                    or "another connector is already connected with this pairing token"
                 )
             session = body.get("session_token")
             if not session:
