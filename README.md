@@ -16,24 +16,28 @@ pairing-token page in its Settings. The command printed there is:
 
 ```bash
 curl -fsSLO https://<your dashboard>/<the connector file named on your token page>
-MODEL_CONNECTOR_TOKEN=<your token> python3 <the downloaded file> \
-  --relay https://<your relay>
+python3 <the downloaded file> --relay https://<your relay>
 ```
 
-In production, keep the token in your secrets manager and hand the
-connector the command that reads it - the token is consulted only when a
-session is established, then traded for a short-lived session token and
-dropped (see `docs/session-tokens-spec.md`):
+It asks for the pairing token, with input hidden - paste it from the token
+page. The token is used to establish a session, then held only in the
+running process's memory (a session is re-established hourly) - never
+written to disk, never in a command line, and gone when the process ends;
+a restart asks again (see `docs/session-tokens-spec.md`).
+
+For a connector that restarts on its own - a service under launchd or
+systemd, with nobody at a terminal - keep the token in your secrets manager
+and hand the connector the command that reads it:
 
 ```bash
 python3 <the downloaded file> --relay https://<your relay> \
-  --token-command "<your secrets manager CLI printing the token>"
+  --token-command "<the command that prints the token>"
 ```
 
 From a checkout of this repository, the same program runs as
-`python3 -m model_connector` with the same flags; the
-`MODEL_CONNECTOR_TOKEN` environment variable remains as the development
-fallback.
+`python3 -m model_connector` with the same flags; `--token-file` and the
+`MODEL_CONNECTOR_TOKEN` environment variable (development only) are the
+remaining sources.
 
 Python 3.12 or newer. A signed container image with a software bill of
 materials is also published, for machines without Python.
@@ -52,11 +56,12 @@ materials is also published, for machines without Python.
   (repeatable) and the connector refuses to forward anywhere else - your
   bound on your network, independent of anything the deployment sends.
   Redirects are never followed, and oversized responses are dropped unread.
-- **Holds one secret, in the environment.** The pairing token rides
-  `MODEL_CONNECTOR_TOKEN` (or `--token-file`), never a command-line
-  argument - argv is readable by every user of the machine. Your deployment
-  stores only the token's SHA-256; revoking it in Settings stops the
-  connector on its next poll.
+- **Holds one secret, in memory.** The pairing token is pasted at a hidden
+  prompt, or read from your secrets manager's CLI (`--token-command`), a
+  file, or `MODEL_CONNECTOR_TOKEN` - never a command-line argument, which
+  every user of the machine can read. Your deployment stores only the
+  token's SHA-256; revoking it in Settings stops the connector on its next
+  poll.
 - **Serves one tenant.** The session handshake names the tenant the relay
   serves; the connector pins that name at first establishment and stops if
   it ever changes. Moving a connector to a different deployment is a

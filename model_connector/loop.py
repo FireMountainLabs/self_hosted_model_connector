@@ -12,6 +12,7 @@ other one.
 from __future__ import annotations
 
 import json
+import getpass
 import os
 import subprocess
 import sys
@@ -61,12 +62,18 @@ class TokenSourceError(RuntimeError):
 
 
 def make_token_source(command: str | None, token_file: str | None):
-    """The pairing token's source, consulted at every session establishment
-    and never cached - the credential's home is the secrets manager (or the
-    managed file), not this process. Precedence: command, then file, then
-    the environment variable (development only; the environment is exactly
-    where machine eyes look first). Never argv: every user on the machine
-    can read a process's arguments.
+    """The pairing token's source, consulted at every session establishment.
+    Precedence: command, then file, then the environment variable
+    (development only; the environment is exactly where machine eyes look
+    first), then - in a terminal - a hidden-input prompt. Never argv: every
+    user on the machine can read a process's arguments.
+
+    Command and file are read fresh each time and never cached: the
+    credential's home is the secrets manager (or the managed file), not
+    this process. The prompted token is the one exception - it is held in
+    this process's memory for as long as it runs, because a session must be
+    re-established every hour and a person cannot be asked hourly. It goes
+    nowhere else: not to disk, not to the environment. A restart asks again.
 
     The command runs through the shell so manager pipelines work verbatim
     (e.g. a CLI call piped through a JSON extractor); it is the operator's
@@ -119,16 +126,39 @@ def make_token_source(command: str | None, token_file: str | None):
 
         return from_file
 
-    def from_env() -> str:
-        env = (os.environ.get(TOKEN_ENV) or "").strip()
-        if not env:
-            raise TokenSourceError(
-                f"no pairing token: pass --token-command (a secrets manager CLI - the "
-                f"production pattern), --token-file, or set {TOKEN_ENV} (development)"
-            )
-        return env
+    held = {"token": ""}
 
-    return from_env
+    def from_env_or_prompt() -> str:
+        env = (os.environ.get(TOKEN_ENV) or "").strip()
+        if env:
+            return env
+        if held["token"]:
+            return held["token"]
+        if not _interactive():
+            raise TokenSourceError(
+                "no pairing token: run this in a terminal and paste the token when asked, "
+                "or pass --token-command (a secrets manager CLI - the pattern for a "
+                f"connector that restarts on its own), --token-file, or set {TOKEN_ENV} "
+                "(development)"
+            )
+        pasted = getpass.getpass("Paste the pairing token (input is hidden): ").strip()
+        if not pasted:
+            raise TokenSourceError("nothing was pasted")
+        held["token"] = pasted
+        return pasted
+
+    return from_env_or_prompt
+
+
+def _interactive() -> bool:
+    """Whether a person is at this process: only then may the token be asked
+    for. Under a service manager stdin is not a terminal, and a prompt there
+    would hang or read the wrong thing - so it is refused with the sources
+    named instead."""
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
 
 
 def egress_facts(relay: str, allowed_hosts: frozenset[str] = frozenset()) -> str:

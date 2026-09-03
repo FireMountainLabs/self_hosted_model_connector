@@ -34,8 +34,8 @@ invalidates live ones within seconds.
 
 ## Decisions
 
-1. **The token source is pluggable and consulted per establishment, never
-   cached.**
+1. **The token source is pluggable and consulted per establishment; only
+   the interactive paste is held.**
    - `--token-command "<command>"` - the connector runs the operator's
      command and reads the token from its stdout (stripped). This is the
      universal secrets-manager adapter: every manager has a CLI, so the
@@ -47,6 +47,13 @@ invalidates live ones within seconds.
    - The environment variable - kept for development and smoke tests, read
      fresh per establishment, and documented as not the production
      pattern: the environment is exactly where machine eyes look first.
+   - A hidden-input prompt, when none of the above is given and a person is
+     at a terminal - the copy-paste path from the token page. The pasted
+     token is held in the process's memory for its lifetime, because
+     re-establishment is hourly and a person cannot be asked hourly; it is
+     never written anywhere, and a restart asks again. Without a terminal
+     there is no prompt: the sources are named and the process exits, so a
+     service never hangs on a prompt nobody will see.
 
 2. **Session establishment is one new endpoint.** `POST
    /connector/session`, pairing token as the bearer, answering a session
@@ -84,9 +91,11 @@ invalidates live ones within seconds.
    with a sentence immediately - a misconfigured command deserves an
    answer while the operator is watching.
 
-8. **Memory hygiene means confinement, not erasure.** The pairing token
-   lives in a variable scoped to the establishment call: never logged,
-   never stored on the client, never placed back into the environment.
+8. **Memory hygiene means confinement, not erasure.** A token from a
+   command, file or the environment lives in a variable scoped to the
+   establishment call; a pasted one lives in the source's closure. Either
+   way: never logged, never stored on the client, never placed back into
+   the environment.
    Python cannot guarantee that freed strings are zeroed, so transient
    copies (the Authorization header) exist until garbage collection; the
    guarantee is that nothing retains one past the exchange.
@@ -120,5 +129,5 @@ invalidates live ones within seconds.
 |---|---|---|
 | The wire, inside TLS | the long-lived token, every request | a short-lived session token; the pairing token once per session |
 | The process environment | the long-lived token | nothing (dev mode: the token, as labeled) |
-| A steady-state memory snapshot | the long-lived token | a short-lived session token |
+| A steady-state memory snapshot | the long-lived token | a short-lived session token (interactively paired: the pairing token too, for the process lifetime) |
 | Shell history and argv | nothing (refused by design) | nothing - the command names a *reference*; running it authenticates against, and is logged by, the manager |
