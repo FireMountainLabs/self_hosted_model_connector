@@ -331,7 +331,11 @@ def serve(
                     try:
                         relay_client.establish()
                         break
-                    except (TokenSourceError, client_mod.KeyBusy) as exc:
+                    except (
+                        TokenSourceError,
+                        client_mod.KeyBusy,
+                        client_mod.RelayUnavailable,
+                    ) as exc:
                         print(f"model-connector: {clean(exc)}; retrying", file=sys.stderr)
                         stop.wait(_RETRY_SLEEP_SECS)
                 if not stop.is_set():
@@ -348,10 +352,15 @@ def serve(
                 # what a revocation would not have).
                 try:
                     relay_client.establish()
-                except (TokenSourceError, client_mod.KeyBusy) as exc:
-                    # A relay still counting the previous session as live is
-                    # the same class as a source that cannot answer this
-                    # instant: both clear on their own within the window.
+                except (
+                    TokenSourceError,
+                    client_mod.KeyBusy,
+                    client_mod.RelayUnavailable,
+                ) as exc:
+                    # A relay still counting the previous session as live, or
+                    # one that cannot reach its store this instant, is the
+                    # same class as a source that cannot answer right now:
+                    # all clear on their own within the window.
                     print(f"model-connector: {clean(exc)}; retrying", file=sys.stderr)
                     stop.wait(_RETRY_SLEEP_SECS)
                 except client_mod.TokenRejected:

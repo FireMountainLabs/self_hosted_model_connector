@@ -59,8 +59,10 @@ materials is also published, for machines without Python.
   never a command-line argument, which every user of the machine can read,
   and never the environment. After the relay accepts it, it is kept in a
   file readable by your account only, and removed the moment the relay
-  refuses it. Your deployment stores only the token's SHA-256; revoking it
-  in Settings stops the connector on its next check-in.
+  says it was revoked - and on nothing else, so a relay that is briefly
+  unreachable or restarting never costs you the pairing. Your deployment
+  stores only the token's SHA-256; revoking it in Settings stops the
+  connector on its next check-in.
 - **Serves one tenant.** The session handshake names the tenant the relay
   serves; the connector pins that name at first establishment and stops if
   it ever changes. Moving a connector to a different deployment is a

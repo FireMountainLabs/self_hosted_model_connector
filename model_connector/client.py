@@ -7,8 +7,16 @@ body codes are the protocol's grammar:
 
 * 401 with body code ``session_expired`` - the session ended (expiry, or a
   relay restart); establish again. Raised as :class:`SessionExpired`.
-* 401 anywhere else - the pairing itself was refused; stop, do not hammer.
-  Raised as :class:`TokenRejected`.
+* 401 with body code ``pairing_revoked`` at establishment - the pairing
+  itself was refused; stop, forget the token, do not hammer. Raised as
+  :class:`TokenRejected`. Only this coded answer means revoked: the stored
+  token is forgotten on it and on nothing else, because a front door, a
+  restarted relay or a relay that cannot reach its store can all answer
+  401 without meaning it.
+* Any other 401 on a poll or a result - establish again (establishment is
+  where a revoked pairing gets its own refusal). At establishment, any
+  other refusal or a 5xx is :class:`RelayUnavailable` - retried, and the
+  token kept.
 * 409 at establishment, body code ``connector_busy`` - a live session already
   holds this pairing token. Raised as :class:`KeyBusy`.
 * 426 - the relay speaks a protocol this connector does not; stop loudly,
@@ -41,6 +49,12 @@ class ProtocolMismatch(RuntimeError):
 class TenantChanged(RuntimeError):
     """The relay now answers for a different tenant than the one this process
     first paired with; only a deliberate restart may move a connector."""
+
+
+class RelayUnavailable(RuntimeError):
+    """The relay could not serve the request right now (a 5xx, or a refusal
+    that names no revoked pairing). A retry, never a reason to forget the
+    token: the relay's own store may be redeploying for a few seconds."""
 
 
 class KeyBusy(RuntimeError):
@@ -105,20 +119,21 @@ class RelayClient:
                 )
             finally:
                 del token
-            if status == 401:
+            message = (body.get("error") or {}).get("message") or ""
+            if status == 401 and _body_code(body) == "pairing_revoked":
                 raise TokenRejected("the relay rejected the pairing token")
             if status == 426:
-                raise ProtocolMismatch(
-                    (body.get("error") or {}).get("message") or "protocol version mismatch"
-                )
+                raise ProtocolMismatch(message or "protocol version mismatch")
             if status == 409:
                 raise KeyBusy(
-                    (body.get("error") or {}).get("message")
-                    or "another connector is already connected with this pairing token"
+                    message or "another connector is already connected with this pairing token"
                 )
             session = body.get("session_token")
-            if not session:
-                raise RuntimeError("the relay answered without a session token")
+            if status != 200 or not session:
+                raise RelayUnavailable(
+                    f"the relay answered HTTP {status}"
+                    + (f": {message}" if message else " without a session token")
+                )
             # A relay that names no tenant (an older deployment) pins the
             # empty name - the check still catches a later move to a relay
             # that does name one.
@@ -144,11 +159,18 @@ class RelayClient:
         return {"Authorization": f"Bearer {session}"}
 
     def _checked(self, status: int, body: dict) -> dict:
-        if status == 401 and _body_code(body) == "session_expired":
+        if status == 401 and _body_code(body) == "pairing_revoked":
+            raise TokenRejected("the relay rejected the pairing token")
+        if status == 401:
+            # Expired, unknown to a restarted relay, or refused by something
+            # in front of it: all read "establish again", and establishment
+            # is the one place a revoked pairing is named as such.
             self._drop_session()
             raise SessionExpired("the session ended; establish a new one")
-        if status == 401:
-            raise TokenRejected("the relay rejected the pairing token")
+        if status >= 500:
+            raise RelayUnavailable(
+                (body.get("error") or {}).get("message") or f"the relay answered HTTP {status}"
+            )
         if status == 426:
             raise ProtocolMismatch(
                 (body.get("error") or {}).get("message") or "protocol version mismatch"

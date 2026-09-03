@@ -203,7 +203,8 @@ def test_serve_stops_on_stop_event_revocation_and_protocol_mismatch():
         return 200, {"job": None}
 
     assert loop.serve(_client(_session_post(post_stop)), 1, stop=stop) == 0
-    assert loop.serve(_client(_session_post(lambda *a, **k: (401, {}))), 1) == 2
+    revoked = {"error": {"code": "pairing_revoked"}}
+    assert loop.serve(_client(_session_post(lambda *a, **k: (401, revoked))), 1) == 2
 
     def post426(url, body, headers, timeout, **kw):
         return 426, {"error": {"message": "relay speaks protocol 3, connector spoke 2"}}
@@ -734,3 +735,104 @@ def test_no_terminal_and_no_stored_token_is_one_sentence(monkeypatch, capsys, tm
         assert e.code == 2
     err = capsys.readouterr().err
     assert "terminal" in err and "Traceback" not in err
+
+
+def test_only_the_revocation_code_forgets():
+    # A front door, a restarted relay or a relay that cannot reach its store
+    # can all answer 401 without meaning revoked. Only the coded answer at
+    # establishment is revocation; everything else keeps the token.
+    def uncoded_401(url, body, headers, timeout, **kw):
+        return 401, {"error": {"message": "unauthorized"}}
+
+    c = client.RelayClient("https://r", lambda: "tok", post=uncoded_401)
+    try:
+        c.establish()
+        raise AssertionError("an uncoded 401 at establishment must not read as revoked")
+    except client.RelayUnavailable as e:
+        assert "401" in str(e) and "unauthorized" in str(e)
+
+    def five_oh_three(url, body, headers, timeout, **kw):
+        return 503, {"error": {"message": "cannot verify pairings right now"}}
+
+    try:
+        client.RelayClient("https://r", lambda: "tok", post=five_oh_three).establish()
+        raise AssertionError("503 must be unavailable")
+    except client.RelayUnavailable as e:
+        assert "cannot verify" in str(e)
+
+    # On a poll: an uncoded 401 is "establish again", a 5xx is a retry, and
+    # only pairing_revoked is the stop.
+    c = _client(_session_post(uncoded_401))
+    try:
+        c.poll({"protocol": 2})
+        raise AssertionError("an uncoded 401 on a poll must read as expired")
+    except client.SessionExpired:
+        pass
+    c = _client(_session_post(five_oh_three))
+    try:
+        c.poll({"protocol": 2})
+        raise AssertionError("a 503 on a poll must be unavailable")
+    except client.RelayUnavailable:
+        pass
+    c = _client(_session_post(lambda *a, **k: (401, {"error": {"code": "pairing_revoked"}})))
+    try:
+        c.poll({"protocol": 2})
+        raise AssertionError("the coded revocation must stop")
+    except client.TokenRejected:
+        pass
+
+
+def test_serve_rides_out_an_unavailable_relay_without_forgetting():
+    # A store outage behind the relay: the poll answers 503, then the session
+    # is gone, then establishment is 503 for a moment - and the loop retries
+    # through all of it, never calling the revocation hook.
+    calls = {"n": 0}
+    stop = threading.Event()
+    forgotten = []
+
+    def post(url, body, headers, timeout, **kw):
+        calls["n"] += 1
+        if url.endswith("/connector/session"):
+            if calls["n"] == 3:
+                return 503, {"error": {"message": "cannot verify pairings right now", "code": "relay_unavailable"}}
+            return 200, {"session_token": f"sess-{calls['n']}", "ttl_seconds": 3600}
+        if calls["n"] == 2:
+            return 401, {"error": {"message": "unauthorized"}}
+        stop.set()
+        return 200, {"job": None}
+
+    c = client.RelayClient("https://r", lambda: "tok", post=post)
+    c.establish()
+    sleep = loop._RETRY_SLEEP_SECS
+    loop._RETRY_SLEEP_SECS = 0.01
+    try:
+        rc = loop.serve(c, 1, stop=stop, on_revoked=lambda: forgotten.append(True))
+    finally:
+        loop._RETRY_SLEEP_SECS = sleep
+    assert rc == 0 and forgotten == []
+
+
+def test_startup_waits_out_an_unavailable_relay_and_keeps_the_token(monkeypatch, capsys, tmp_path):
+    p = tmp_path / "p.json"
+    pairing.PairingStore("https://relay.invalid", path=p).save("tok")
+    monkeypatch.setattr(main_mod.pairing, "default_path", lambda: p)
+    monkeypatch.setattr(loop, "_BUSY_RETRY_SECS", 0.2)
+    monkeypatch.setattr(loop, "_BUSY_RETRY_STEP", 0.05)
+
+    class Down:
+        def __init__(self, relay, source):
+            pass
+
+        def establish(self):
+            raise client.RelayUnavailable("the relay answered HTTP 503: cannot verify pairings")
+
+    monkeypatch.setattr(main_mod.client, "RelayClient", Down)
+    try:
+        main_mod.main(["--relay", "https://relay.invalid"])
+        raise AssertionError("an unavailable relay must exit after the wait")
+    except SystemExit as e:
+        assert e.code == 2
+    err = capsys.readouterr().err
+    assert err.count("waiting for the relay") == 1
+    assert "the pairing is kept" in err and "Traceback" not in err
+    assert pairing.PairingStore("https://relay.invalid", path=p).load() == "tok"

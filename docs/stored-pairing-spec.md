@@ -57,11 +57,17 @@ newcomer waits briefly (a restart on a crash's heels) and then stops
    pairings to several deployments. A damaged file reads as absent and is
    replaced on the next save: it costs one paste, never a support call.
 
-4. **Refusal forgets.** The relay's `pairing_revoked` answer removes the
-   token from memory and disk, wherever it surfaces - at startup, at an
-   hourly re-establishment, or mid-delivery. The next start asks again.
-   This is what keeps the file honest: it never holds a token that is not
-   currently paired.
+4. **Only the revocation answer forgets.** The relay's coded
+   `pairing_revoked` answer at establishment removes the token from memory
+   and disk, wherever it surfaces - at startup, at an hourly
+   re-establishment, or mid-delivery. The next start asks again. This is
+   what keeps the file honest: it never holds a token that is not currently
+   paired. Nothing else forgets: an uncoded 401 (a front door, a relay
+   restarted since the session was minted), a 5xx (a relay that cannot
+   reach its store for a few seconds) and busy are all retried with the
+   token kept, because each can happen to a pairing the deployment still
+   holds, and a connector that forgot on one of them would destroy the
+   only copy of a good credential.
 
 5. **One live session per token.** The relay tracks each session's last
    poll. A session that polled inside the live window (a minute; the poll

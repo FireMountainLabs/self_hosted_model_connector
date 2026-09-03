@@ -82,6 +82,9 @@ def main(argv: list[str] | None = None) -> int:
             "another connector is already connected with this pairing token - each "
             "connector needs its own: generate another in Settings"
         )
+    except client.RelayUnavailable as exc:
+        # Not revoked, so the token stays: the next start needs no paste.
+        return loop._die(f"{exc} - the pairing is kept; try again shortly")
     except tls.Aes256Error as exc:
         return loop._die(str(exc))
     except OSError as exc:
@@ -112,26 +115,28 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _establish_while_watching(relay_client) -> None:
-    """The first establishment, with the operator at the keyboard. A busy
-    answer is waited out for a bounded time - the relay lets a token go about
-    a minute after its previous holder's last poll, so a restart right after
-    a crash pairs on its own - and a token genuinely in use elsewhere is
-    refused after the wait, in plain words."""
+    """The first establishment, with the operator at the keyboard. Two
+    answers are waited out for a bounded time: busy - the relay lets a token
+    go about a minute after its previous holder's last poll, so a restart
+    right after a crash pairs on its own - and unavailable - a relay whose
+    store is redeploying for a few seconds. After the wait each is refused
+    in plain words; a token genuinely in use elsewhere needs its own."""
     deadline = time.monotonic() + loop._BUSY_RETRY_SECS
     said = False
     while True:
         try:
             relay_client.establish()
             return
-        except client.KeyBusy:
+        except (client.KeyBusy, client.RelayUnavailable) as exc:
             if time.monotonic() >= deadline:
                 raise
             if not said:
-                print(
-                    "model-connector: another connector is connected with this token; "
-                    "waiting for it to go quiet",
-                    file=sys.stderr,
+                line = (
+                    "another connector is connected with this token; waiting for it to go quiet"
+                    if isinstance(exc, client.KeyBusy)
+                    else f"{loop.clean(exc)}; waiting for the relay"
                 )
+                print(f"model-connector: {line}", file=sys.stderr)
                 said = True
             time.sleep(loop._BUSY_RETRY_STEP)
 
