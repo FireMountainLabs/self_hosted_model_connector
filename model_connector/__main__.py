@@ -20,8 +20,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--token-command",
         help="a command whose stdout is the pairing token - your secrets "
-        "manager's CLI (the production pattern); consulted at each session "
-        "establishment, so rotation needs no restart",
+        "manager's CLI, for a connector that restarts on its own; consulted "
+        "at each session establishment, so rotation needs no restart. "
+        "Without any token option, the token is asked for at a hidden "
+        "prompt and held in memory only",
     )
     p.add_argument(
         "--token-file",

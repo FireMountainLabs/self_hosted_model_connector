@@ -104,6 +104,66 @@ def test_token_sources_command_file_env(tmp_path):
         assert "--token-command" in str(e)
 
 
+def test_no_source_in_a_terminal_asks_once_and_holds_the_paste(monkeypatch):
+    # The copy-paste path: a person at a terminal is asked once, with input
+    # hidden, and the paste is held in memory for the hourly re-establishment
+    # - never written anywhere. Without a terminal there is no prompt: the
+    # sources are named and the process exits, so a service never hangs on a
+    # prompt nobody will see.
+    monkeypatch.delenv(loop.TOKEN_ENV, raising=False)
+    asked = []
+
+    def fake_getpass(prompt):
+        asked.append(prompt)
+        return "  pasted-tok \n"
+
+    monkeypatch.setattr(loop.getpass, "getpass", fake_getpass)
+    monkeypatch.setattr(loop, "_interactive", lambda: True)
+    src = loop.make_token_source(None, None)
+    assert src() == "pasted-tok"
+    assert src() == "pasted-tok"
+    assert len(asked) == 1 and "hidden" in asked[0]
+    # The environment still wins when set - the development shortcut is not
+    # silently replaced by a prompt.
+    monkeypatch.setenv(loop.TOKEN_ENV, "env-tok")
+    assert loop.make_token_source(None, None)() == "env-tok"
+    monkeypatch.delenv(loop.TOKEN_ENV)
+
+    monkeypatch.setattr(loop.getpass, "getpass", lambda prompt: "   ")
+    try:
+        loop.make_token_source(None, None)()
+        raise AssertionError("an empty paste must raise")
+    except loop.TokenSourceError as e:
+        assert "nothing was pasted" in str(e)
+
+    def never(prompt):
+        raise AssertionError("no prompt without a terminal")
+
+    monkeypatch.setattr(loop, "_interactive", lambda: False)
+    monkeypatch.setattr(loop.getpass, "getpass", never)
+    try:
+        loop.make_token_source(None, None)()
+        raise AssertionError("no terminal and no source must raise")
+    except loop.TokenSourceError as e:
+        assert "terminal" in str(e) and "--token-command" in str(e)
+
+
+def test_interactive_is_the_terminal_check(monkeypatch):
+    import io
+
+    monkeypatch.setattr(loop.sys, "stdin", io.StringIO())
+    assert loop._interactive() is False
+    monkeypatch.setattr(loop.sys, "stdin", None)
+    assert loop._interactive() is False
+
+    class Closed:
+        def isatty(self):
+            raise ValueError("closed")
+
+    monkeypatch.setattr(loop.sys, "stdin", Closed())
+    assert loop._interactive() is False
+
+
 def test_establish_uses_the_pairing_token_once_and_keeps_only_the_session():
     seen = {"auth": []}
 
