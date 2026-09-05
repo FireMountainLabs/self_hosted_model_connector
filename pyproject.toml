@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "self-hosted-model-connector"
-version = "3.0.0"
+version = "3.1.0"
 description = "Serve a model on your own network to your deployment, dialing out only."
 readme = "README.md"
 requires-python = ">=3.12"

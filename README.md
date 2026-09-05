@@ -68,6 +68,10 @@ materials is also published, for machines without Python.
   it ever changes. Moving a connector to a different deployment is a
   deliberate restart, never something a re-pointed relay address can do to
   a running process.
+- **Answers two questions.** A job is a completion to forward, or the
+  deployment asking what the server at that address serves (its `/models`
+  list, so the admin picks from real names before the first review). Any
+  other kind of job is refused with a message, never forwarded.
 - **Stores one thing.** The pairing token, on this machine, after the
   relay accepted it. Requests are forwarded and answered and never written
   anywhere.
