@@ -6,7 +6,7 @@ only** - nothing on your network ever accepts an incoming connection.
 This repository exists so that what runs on your machines is inspectable:
 it is the connector exactly as shipped, published in the open. It is plain
 Python with **no dependencies at all** - the standard library only - which
-you can verify by reading the five files in `model_connector/`.
+you can verify by reading the six files in `model_connector/`.
 
 ## Run it
 
