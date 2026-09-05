@@ -3,8 +3,10 @@
 Status: implemented in v2.0.0 (protocol 2). Decision 1's token sources were
 superseded in v3.0.0 by the stored pairing (`stored-pairing-spec.md`): the
 pasted token is the one source, remembered on the machine after the relay
-accepts it. Sessions, the two failure meanings, revocation, restart and the
-tenant pin (decisions 2 to 9) stand unchanged.
+accepts it. Sessions, the two failure meanings, revocation and restart
+(decisions 2 to 7) stand unchanged. Decisions 8 and 9 stand as amended
+below: the stored pairing keeps the accepted token on disk, and re-pairing
+after a revocation is a restart with a fresh paste.
 
 ## Purpose
 
@@ -95,24 +97,25 @@ invalidates live ones within seconds.
    with a sentence immediately - a misconfigured command deserves an
    answer while the operator is watching.
 
-8. **Memory hygiene means confinement, not erasure.** A token from a
-   command, file or the environment lives in a variable scoped to the
-   establishment call; a pasted one lives in the source's closure. Either
-   way: never logged, never stored on the client, never placed back into
-   the environment.
+8. **Memory hygiene means confinement, not erasure.** The pasted token is
+   held by the token source for the process's life and, once the relay has
+   accepted it, in one owner-only file on the machine (the stored pairing,
+   `stored-pairing-spec.md`) - those two places and nowhere else: never
+   logged, never placed in the environment, never in argv.
    Python cannot guarantee that freed strings are zeroed, so transient
    copies (the Authorization header) exist until garbage collection; the
-   guarantee is that nothing retains one past the exchange.
+   guarantee is that nothing beyond the source and the pairing file
+   retains one.
 
 9. **The tenant is pinned for the life of the process.** The session
    answer names the tenant the relay serves; the connector pins that name
    at first establishment and stops - loudly, exit 2 - if a later
    establishment answers a different one. A re-pointed relay address must
-   never silently move a running connector between deployments. The pin is
-   memory-only (the connector stores nothing), so re-pairing stays simple:
-   a new token for the same tenant works live with no restart, and moving
-   a box to a different tenant is a deliberate restart with that tenant's
-   relay and token. A relay that names no tenant (an older deployment)
+   never silently move a running connector between deployments. The pin
+   itself is memory-only - it is deliberately not part of the stored
+   pairing - so moving a box to a different tenant is a restart with that
+   tenant's relay and token, and a revoked token means a restart with a
+   fresh paste. A relay that names no tenant (an older deployment)
    pins the empty name, which keeps the connector compatible until the
    fleet catches up.
 
