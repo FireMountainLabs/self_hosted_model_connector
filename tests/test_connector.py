@@ -175,6 +175,77 @@ def test_serve_once_calls_the_jobs_own_address_and_posts_result():
     assert "choices" in seen["result_body"]
 
 
+def test_a_models_job_answers_with_the_servers_list_and_never_forwards():
+    # The deployment asks what the box serves before anyone picks a model:
+    # a job of kind "models" is answered from the server's own /models, in
+    # the OpenAI shape, and is never forwarded as a completion. The address
+    # it named also feeds the next poll's declaration, so the relay's list
+    # fills before the first real job. An unknown kind is a typed error - a
+    # newer relay never gets a silent completion in place of what it asked.
+    results = []
+    jobs = [
+        {"job_id": "m1", "kind": "models", "payload": {}, "model_url": "http://127.0.0.1:8080/v1"},
+        {"job_id": "x1", "kind": "teleport", "payload": {}, "model_url": "http://127.0.0.1:8080/v1"},
+    ]
+    polls = []
+
+    def post(url, body, headers, timeout, **kw):
+        if url.endswith("/connector/poll"):
+            polls.append(body)
+            return 200, {"job": jobs.pop(0) if jobs else None}
+        results.append((url, body))
+        return 200, {}
+
+    def never(model_url, payload, timeout=290.0):
+        raise AssertionError("a models job must not be forwarded as a completion")
+
+    def listing(model_url, timeout=10.0):
+        assert model_url == "http://127.0.0.1:8080/v1"
+        return {"data": [{"id": "gemma-4-27b"}, {"id": "qwen3-32b"}]}
+
+    c = _client(_session_post(post))
+    loop.serve(c, 1, once=True, call=never, models=listing)
+    assert results[0][0].endswith("/m1")
+    assert [m["id"] for m in results[0][1]["data"]] == ["gemma-4-27b", "qwen3-32b"]
+    assert polls[0]["served_models"] == []  # nothing to ask before the first job names a server
+    loop.serve(c, 1, once=True, call=never, models=listing)
+    assert results[1][0].endswith("/x1")
+    assert "teleport" in results[1][1]["error"]["message"]
+    assert "update the connector" in results[1][1]["error"]["message"]
+
+
+def test_list_models_is_typed_on_failure_and_shaped_on_success(monkeypatch):
+    import io
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class Opener:
+        def open(self, req, timeout):
+            assert req == "http://127.0.0.1:8080/v1/models"
+            return _Resp(b'{"data": [{"id": "a"}, {"id": ""}, {"nope": 1}, {"id": "b\\nb"}]}')
+
+    monkeypatch.setattr(loop, "_opener", Opener())
+    out = loop.list_models("http://127.0.0.1:8080/v1")
+    assert out == {"data": [{"id": "a"}, {"id": "b b"}]}
+
+    class Down:
+        def open(self, req, timeout):
+            raise OSError("connection refused")
+
+    monkeypatch.setattr(loop, "_opener", Down())
+    out = loop.list_models("http://127.0.0.1:8080/v1")
+    assert "could not read the model list" in out["error"]["message"]
+    assert "connection refused" in out["error"]["message"]
+    # The declaration keeps its empty-is-fine contract on top of the typed read.
+    assert loop._served_models("http://127.0.0.1:8080/v1") == []
+    assert loop._served_models("") == []
+
+
 def test_an_unsanctioned_address_answers_typed_and_the_loop_lives_on():
     results = []
     jobs = [

@@ -244,21 +244,35 @@ def _declare(concurrency: int, model_url: str) -> dict:
     }
 
 
+def list_models(model_url: str, timeout: float = 10.0) -> dict:
+    """The local server's /models, in the OpenAI shape the deployment already
+    reads, or a typed error naming what failed. Ids are shaped here (one
+    line, bounded, at most 20) because they are tenant-network text on their
+    way to a screen. This answers a job of kind "models" - the deployment's
+    question "what does this box serve?", asked before anyone picks."""
+    try:
+        with _opener.open(  # noqa: S310 - scheme constrained by validate_urls; never redirects
+            model_url.rstrip("/") + "/models", timeout=timeout
+        ) as resp:
+            data = json.loads(tls.read_capped(resp))
+    except Exception as exc:  # noqa: BLE001 - any failure becomes the typed error the relay forwards
+        return {"error": {"message": f"could not read the model list: {exc}"[:300]}}
+    ids = []
+    for m in data.get("data", []) if isinstance(data, dict) else []:
+        mid = " ".join(str(m.get("id") or "").split())[:200] if isinstance(m, dict) else ""
+        if mid:
+            ids.append(mid)
+    return {"data": [{"id": mid} for mid in ids[:20]]}
+
+
 def _served_models(model_url: str) -> list[str]:
-    """Best-effort read of the local server's /models; an empty list is fine
-    (the relay's model listing just stays empty until the next declare). The
+    """Best-effort read for the poll declaration; an empty list is fine (the
+    relay's declared listing just stays empty until the next declare). The
     address is the last one a job named, so before the first job there is
     nothing to ask."""
     if not model_url:
         return []
-    try:
-        with _opener.open(  # noqa: S310 - scheme constrained by validate_urls; never redirects
-            model_url.rstrip("/") + "/models", timeout=5
-        ) as resp:
-            data = json.loads(tls.read_capped(resp))
-        return [str(m.get("id")) for m in data.get("data", []) if m.get("id")][:20]
-    except Exception:  # noqa: BLE001 - best-effort read; empty is a fine declaration
-        return []
+    return [m["id"] for m in list_models(model_url, timeout=5).get("data", [])]
 
 
 def serve(
@@ -269,6 +283,7 @@ def serve(
     allowed_hosts: frozenset[str] = frozenset(),
     once: bool = False,
     call=call_model,
+    models=list_models,
     stop: threading.Event | None = None,
     on_revoked=None,
 ) -> int:
@@ -314,7 +329,21 @@ def serve(
                 answer = {"error": {"message": refusal}}
             else:
                 last_url["value"] = url
-                answer = call(url, job["payload"])
+                # A job's kind names the question: a completion to forward, or
+                # the server's model list. Anything else is a relay this
+                # connector does not understand, answered as such rather than
+                # forwarded as a completion it never was.
+                kind = str(job.get("kind") or "completion")
+                if kind == "completion":
+                    answer = call(url, job["payload"])
+                elif kind == "models":
+                    answer = models(url)
+                else:
+                    answer = {
+                        "error": {
+                            "message": f"unknown job kind {kind!r} - update the connector"
+                        }
+                    }
             try:
                 relay_client.result(job["job_id"], answer)
             except client_mod.SessionExpired:
