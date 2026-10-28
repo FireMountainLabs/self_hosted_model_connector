@@ -148,24 +148,36 @@ class RelayClient:
                 )
             self._session = str(session)
 
-    def _drop_session(self) -> None:
-        with self._lock:
-            self._session = None
+    def _drop_session(self, session: str) -> None:
+        """Forget ``session`` if it is still the current one.
 
-    def _headers(self) -> dict[str, str]:
+        Workers share one session, and a 401 answers the request that was in
+        flight when the session ended, not the session held now: by the time
+        a slow worker reads its refusal, a faster one may already have
+        re-established. Dropping unconditionally would discard that fresh
+        session and mint another, which puts the pairing token on the wire
+        once more and, on a relay that keeps one live session per token,
+        retires the fresh one under the worker using it."""
+        with self._lock:
+            if self._session == session:
+                self._session = None
+
+    def _headers(self) -> tuple[dict[str, str], str]:
+        """The Bearer header and the session it names: the caller keeps the
+        session so a refusal of this request can be attributed to it."""
         session = self._session
         if session is None:
             raise SessionExpired("no session established")
-        return {"Authorization": f"Bearer {session}"}
+        return {"Authorization": f"Bearer {session}"}, session
 
-    def _checked(self, status: int, body: dict) -> dict:
+    def _checked(self, status: int, body: dict, session: str) -> dict:
         if status == 401 and _body_code(body) == "pairing_revoked":
             raise TokenRejected("the relay rejected the pairing token")
         if status == 401:
             # Expired, unknown to a restarted relay, or refused by something
             # in front of it: all read "establish again", and establishment
             # is the one place a revoked pairing is named as such.
-            self._drop_session()
+            self._drop_session(session)
             raise SessionExpired("the session ended; establish a new one")
         if status >= 500:
             raise RelayUnavailable(
@@ -184,13 +196,15 @@ class RelayClient:
     def poll_reply(self, declare: dict) -> dict:
         """The whole poll reply: ``job`` (or None), and ``poll_after`` when a
         quiet relay asks this connector to wait before it polls again."""
+        headers, session = self._headers()
         status, body = self._post(
-            f"{self._relay}/connector/poll", declare, self._headers(), self._timeout
+            f"{self._relay}/connector/poll", declare, headers, self._timeout
         )
-        return self._checked(status, body)
+        return self._checked(status, body, session)
 
     def result(self, job_id: str, body: dict) -> None:
+        headers, session = self._headers()
         status, resp = self._post(
-            f"{self._relay}/connector/result/{job_id}", body, self._headers(), self._timeout
+            f"{self._relay}/connector/result/{job_id}", body, headers, self._timeout
         )
-        self._checked(status, resp)
+        self._checked(status, resp, session)

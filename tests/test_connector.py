@@ -520,9 +520,9 @@ def test_tenant_is_pinned_across_establishments():
 
     c = client.RelayClient("https://r", lambda: "tok", post=post)
     c.establish()  # pins "acme"
-    c._drop_session()
+    c._drop_session(c._session)
     c.establish()  # same tenant re-establishes fine
-    c._drop_session()
+    c._drop_session(c._session)
     try:
         c.establish()
         raise AssertionError("a changed tenant must raise TenantChanged")
@@ -562,7 +562,7 @@ def test_a_relay_naming_no_tenant_stays_compatible():
 
     c = client.RelayClient("https://r", lambda: "tok", post=post)
     c.establish()
-    c._drop_session()
+    c._drop_session(c._session)
     c.establish()  # the empty name pins and re-pins without complaint
     assert c.poll({"protocol": 2}) is None
 
