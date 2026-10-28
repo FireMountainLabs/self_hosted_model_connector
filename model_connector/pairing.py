@@ -1,11 +1,14 @@
 """Where the pasted pairing token lives between runs.
 
-One file per user, keyed by relay address, readable by the owner only. The
-token is written after the relay has accepted it once and removed the
-moment the relay refuses it, so the file never holds a token that is not
-currently paired. Nothing else is stored: the model server address arrives
-per request from the deployment, and the tenant pin is memory-only by
-design (a restart is the one deliberate way to move a connector).
+One file per user, keyed by relay address. On Linux and macOS it is readable
+by the owner only (0600 in a 0700 directory); on Windows it carries the
+profile folder's own permissions, because the standard library has no
+portable call to narrow an ACL. The token is written after the relay has
+accepted it once and removed the moment the relay refuses it, so the file
+never holds a token that is not currently paired. Nothing else is stored:
+the model server address arrives per request from the deployment, and the
+tenant pin is memory-only by design (a restart is the one deliberate way to
+move a connector).
 
 The posture is that of an SSH key or a cloud CLI login - a credential on
 disk under the account's own permissions. Anyone who can read this file as
@@ -34,6 +37,17 @@ def default_path() -> Path:
     else:
         base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
     return base / "model-connector" / _FILENAME
+
+
+def permissions_note() -> str:
+    """What protects the stored file on this platform, in the words the
+    startup line prints. The standard library has no portable ACL call, so
+    on Windows the file keeps the profile folder's own permissions (the user,
+    SYSTEM and Administrators by default) and the line must not promise more
+    than that."""
+    if os.name == "posix":
+        return "owner-only file"
+    return "file under your profile's own permissions"
 
 
 def _key(relay: str) -> str:

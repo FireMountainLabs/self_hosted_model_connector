@@ -52,8 +52,12 @@ newcomer waits briefly (a restart on a crash's heels) and then stops
 
 3. **Where, and how.** `$XDG_CONFIG_HOME/model-connector/pairings.json`
    (`~/.config/...` by default) on POSIX, `%APPDATA%\model-connector\` on
-   Windows; directory `0700`, file `0600`, written beside the target and
-   renamed into place. Keyed by relay address, so one machine can hold
+   Windows; written beside the target and renamed into place. On Linux and
+   macOS the directory is `0700` and the file `0600`. On Windows the file
+   carries the profile folder's own permissions (the user, SYSTEM and
+   Administrators by default) and nothing stronger is set: the standard
+   library has no portable ACL call, and a relocated or shared profile is
+   the operator's to secure. Keyed by relay address, so one machine can hold
    pairings to several deployments. A damaged file reads as absent and is
    replaced on the next save: it costs one paste, never a support call.
 
