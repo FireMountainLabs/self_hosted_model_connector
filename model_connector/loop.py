@@ -158,9 +158,19 @@ def egress_facts(relay: str, allowed_hosts: frozenset[str] = frozenset()) -> str
             "    (bound this with --model-host HOST[:PORT] to refuse every other\n"
             "    scheme, host and port)"
         )
+    # The scheme stated is the one the connector will dial: validate_relay_url
+    # admits plain http only for a loopback relay, and an HTTPS or AES-256
+    # claim about that connection would misstate the egress to the reviewer.
+    if r.scheme == "https":
+        transport = "over HTTPS (AES-256 verified per connection)"
+    else:
+        transport = (
+            "over plain HTTP - accepted only for a loopback relay, so this\n"
+            "    connection never leaves this machine"
+        )
     return (
         "model-connector egress:\n"
-        f"  dials out to: {host} port {port} over HTTPS (AES-256 verified per connection)\n"
+        f"  dials out to: {host} port {port} {transport}\n"
         f"{model_line}\n"
         "  listens on: nothing - this process opens no inbound sockets, ever\n"
         "  no other destinations, and redirects are never followed"
