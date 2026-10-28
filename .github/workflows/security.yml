@@ -15,6 +15,11 @@
 #   - trivy       - known-vulnerability and misconfiguration scan of the
 #                   repository tree (with no dependencies to carry, a finding
 #                   here is a real one)
+#
+# Every job carries a timeout: a hung scan otherwise holds a runner for the
+# 360-minute default, and a fork pull request can construct a hang on
+# purpose. Fifteen minutes is several times what any of the three takes on a
+# tree this size.
 name: Security scan
 
 on:
@@ -31,6 +36,7 @@ jobs:
   codeql:
     name: CodeQL (python)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       security-events: write
@@ -44,6 +50,7 @@ jobs:
   secrets:
     name: Secret scan (gitleaks)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -67,6 +74,7 @@ jobs:
   trivy:
     name: Vulnerabilities + misconfig (trivy)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: trivy filesystem scan

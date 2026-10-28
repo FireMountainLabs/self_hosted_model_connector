@@ -19,12 +19,18 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python: ["3.12", "3.13"]
     runs-on: ${{ matrix.os }}
+    # A hung leg otherwise holds a runner for the 360-minute default, and a
+    # fork pull request can construct a hang on purpose. Every matrix leg
+    # finishes in under a minute.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: ${{ matrix.python }}
-      - run: python -m pip install --quiet pytest
+      # Exact pin: an unpinned install resolves to whatever is current on the
+      # day, in a job that fork pull requests trigger.
+      - run: python -m pip install --quiet pytest==9.1.1
       - run: python -m pytest tests -q
       - name: The CLI runs from a plain checkout
         run: python -m model_connector --relay https://relay.example --print-egress
