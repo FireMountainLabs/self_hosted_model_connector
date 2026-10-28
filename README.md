@@ -35,6 +35,25 @@ is shown beside the token in Settings, and the newcomer stops after a
 short wait (a connector restarting right after a crash gets in on its
 own).
 
+### Unpairing this machine
+
+A revocation has two halves. Revoking the token in your deployment's
+Settings (Connectors tab) is what actually ends the pairing: the relay
+refuses the token from then on, and a running connector stops and forgets
+it on its next check-in. Removing the token from this machine is the other
+half, and it is a flag:
+
+```bash
+python3 <the downloaded file> --relay https://<your relay> --forget
+```
+
+`--forget` deletes the saved pairing for that relay from the owner-only
+file named above (and the file itself when it was the last entry) and
+exits, without contacting the relay. It is the half that still works when
+the platform cannot be reached - when your access to it has been severed,
+or it is down - but it is only that half: the token stays valid on the
+platform until someone revokes it in Settings.
+
 From a checkout of this repository, the same program runs as
 `python3 -m model_connector` with the same flags.
 
