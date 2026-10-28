@@ -42,6 +42,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--once", action="store_true", help="one poll cycle, then exit (smoke test)")
     p.add_argument(
+        "--forget",
+        action="store_true",
+        help="remove the saved pairing for this relay from this machine, then exit; "
+        "the token itself stays valid until revoked in Settings, Connectors tab",
+    )
+    p.add_argument(
         "--print-egress",
         action="store_true",
         help="print every network destination this process will dial, then exit",
@@ -60,6 +66,23 @@ def main(argv: list[str] | None = None) -> int:
         # before any token is loaded: describing where this would connect
         # must not require the credential to connect.
         print(loop.egress_facts(args.relay, allowed_hosts))
+        return 0
+    if args.forget:
+        # The connector's half of a revocation, for when the platform cannot
+        # be reached: the credential leaves this machine without a byte to
+        # the relay - no RelayClient, no token source, no prompt. It cannot
+        # revoke the token (only Settings can), so the line says that
+        # plainly rather than let a cleared file read as a revoked token.
+        store = pairing.PairingStore(args.relay)
+        if store.load() is None:
+            print(f"model-connector: nothing was saved for {args.relay} in {store.path}")
+        else:
+            store.forget()
+            print(
+                f"model-connector: removed the saved pairing for {args.relay} from "
+                f"{store.path} on this machine only; the token stays valid on the "
+                "platform until it is revoked in Settings, Connectors tab"
+            )
         return 0
     source = loop.make_token_source(pairing.PairingStore(args.relay))
     relay_client = client.RelayClient(args.relay, source)
