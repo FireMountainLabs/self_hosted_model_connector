@@ -26,6 +26,11 @@ from model_connector import pairing, tls
 
 PROTOCOL = 2
 _RETRY_SLEEP_SECS = 2.0
+# A quiet relay answers an empty poll at once and names how long to wait
+# before the next, because the host it runs on bills for every second a poll
+# is held open. The wait is bounded here: a relay must not be able to park
+# this process for longer than the bound by naming a large number.
+_POLL_AFTER_MAX_SECS = 30.0
 # How long a starting connector waits for a token's previous holder to go
 # quiet before giving up: the relay lets a token go about a minute after its
 # last poll, so a restart on the heels of a crash (a service manager's,
@@ -241,7 +246,21 @@ def _declare(concurrency: int, model_url: str) -> dict:
         "protocol": PROTOCOL,
         "concurrency": concurrency,
         "served_models": _served_models(model_url),
+        # This connector honours poll_after; a relay holds the poll of a
+        # connector that does not say so, since it would poll again at once.
+        "can_wait": True,
     }
+
+
+def poll_after(reply: dict) -> float:
+    """Seconds to wait before the next poll, from an empty poll's reply: 0
+    when the relay names none, or names something that is not a number."""
+    value = reply.get("poll_after")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    if value != value:  # NaN
+        return 0.0
+    return min(max(float(value), 0.0), _POLL_AFTER_MAX_SECS)
 
 
 def list_models(model_url: str, timeout: float = 10.0) -> dict:
@@ -319,8 +338,11 @@ def serve(
     # one declaration lists the previous server's models, corrected next poll.
     last_url = {"value": ""}
 
-    def one_cycle() -> None:
-        job = relay_client.poll(_declare(concurrency, last_url["value"]))
+    def one_cycle(wait: bool = True) -> None:
+        reply = relay_client.poll_reply(_declare(concurrency, last_url["value"]))
+        job = reply.get("job")
+        if not job and wait:
+            stop.wait(poll_after(reply))
         if job:
             print(f"model-connector: serving job {clean(job['job_id'])}")
             url = str(job.get("model_url") or "")
@@ -415,7 +437,7 @@ def serve(
                 stop.wait(_RETRY_SLEEP_SECS)
 
     if once:
-        one_cycle()
+        one_cycle(wait=False)
         return 0
     threads = [threading.Thread(target=loop_forever, daemon=True) for _ in range(concurrency)]
     for t in threads:

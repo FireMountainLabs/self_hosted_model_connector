@@ -10,6 +10,7 @@ import contextlib
 import io
 import os
 import threading
+import time
 
 from model_connector import __main__ as main_mod
 from model_connector import client, loop, pairing
@@ -907,3 +908,82 @@ def test_startup_waits_out_an_unavailable_relay_and_keeps_the_token(monkeypatch,
     assert err.count("waiting for the relay") == 1
     assert "the pairing is kept" in err and "Traceback" not in err
     assert pairing.PairingStore("https://relay.invalid", path=p).load() == "tok"
+
+
+def test_every_poll_declares_that_this_connector_can_wait():
+    seen = []
+
+    def post(url, body, headers, timeout, **kw):
+        seen.append(body)
+        return 200, {"job": None}
+
+    loop.serve(_client(_session_post(post)), 1, once=True)
+    assert seen and seen[0]["can_wait"] is True
+
+
+def test_poll_after_is_read_and_bounded():
+    assert loop.poll_after({"job": None, "poll_after": 10}) == 10.0
+    assert loop.poll_after({"job": None, "poll_after": 2.5}) == 2.5
+    assert loop.poll_after({"job": None}) == 0.0
+    assert loop.poll_after({"job": None, "poll_after": -4}) == 0.0
+    assert loop.poll_after({"job": None, "poll_after": 10_000}) == 30.0
+    for junk in ("10", None, True, [10], float("nan")):
+        assert loop.poll_after({"job": None, "poll_after": junk}) == 0.0
+
+
+def test_an_empty_poll_with_poll_after_waits_before_the_next():
+    """The quiet relay's reply: the loop sleeps the named time, then polls
+    again; a stop during the sleep ends it at once."""
+    stop = threading.Event()
+    times = []
+
+    def post(url, body, headers, timeout, **kw):
+        times.append(time.monotonic())
+        if len(times) == 3:
+            stop.set()
+        return 200, {"job": None, "poll_after": 0.2}
+
+    assert loop.serve(_client(_session_post(post)), 1, stop=stop) == 0
+    gaps = [b - a for a, b in zip(times, times[1:])]
+    assert len(gaps) == 2 and all(g >= 0.18 for g in gaps)
+
+
+def test_an_empty_poll_without_poll_after_polls_again_at_once():
+    """A relay that names no wait holds its polls itself, as every relay
+    before poll_after did: the loop polls again at once."""
+    stop = threading.Event()
+    times = []
+
+    def post(url, body, headers, timeout, **kw):
+        times.append(time.monotonic())
+        if len(times) == 3:
+            stop.set()
+        return 200, {"job": None}
+
+    assert loop.serve(_client(_session_post(post)), 1, stop=stop) == 0
+    assert times[-1] - times[0] < 1.0
+
+
+def test_a_job_beside_poll_after_is_served_and_the_next_poll_is_not_delayed():
+    """poll_after is a wait after an EMPTY poll only: a reply carrying a job
+    is served, and the poll after it goes out at once."""
+    stop = threading.Event()
+    polls = []
+    served = []
+
+    def post(url, body, headers, timeout, **kw):
+        if url.endswith("/connector/poll"):
+            polls.append(time.monotonic())
+            if len(polls) == 2:
+                stop.set()
+                return 200, {"job": None}
+            job = {"job_id": "j1", "payload": {}, "model_url": "http://127.0.0.1:1/v1"}
+            return 200, {"job": job, "poll_after": 30}
+        served.append(url)
+        return 200, {"ok": True}
+
+    rc = loop.serve(
+        _client(_session_post(post)), 1, stop=stop, call=lambda u, p: {"choices": []}
+    )
+    assert rc == 0 and served and served[0].endswith("/j1")
+    assert len(polls) == 2 and polls[1] - polls[0] < 5.0

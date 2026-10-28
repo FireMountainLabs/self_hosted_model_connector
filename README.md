@@ -46,6 +46,9 @@ materials is also published, for machines without Python.
 - **Dials out only.** The connector long-polls your deployment's relay over
   HTTPS and forwards each request to the model server *you* named in your
   deployment's Settings. It opens no ports and accepts no connections.
+  When no work has come for a while, the relay answers each poll at once
+  and tells the connector to wait (at most 30 seconds) before the next, so
+  the relay's host is not billed for a poll held open around the clock.
 - **Verifies encryption.** It refuses a relay connection that would not
   carry AES-256, and refuses plain http to a model server on a different
   machine unless you explicitly acknowledge it
