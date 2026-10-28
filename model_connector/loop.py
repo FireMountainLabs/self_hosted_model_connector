@@ -19,7 +19,7 @@ import time
 import urllib.error
 import urllib.request
 from typing import NoReturn
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from model_connector import client as client_mod
 from model_connector import pairing, tls
@@ -148,13 +148,15 @@ def egress_facts(relay: str, allowed_hosts: frozenset[str] = frozenset()) -> str
     if allowed_hosts:
         model_line = (
             f"  and to: {', '.join(sorted(allowed_hosts))} only (--model-host) -\n"
-            "    requests naming any other model server are refused"
+            "    the bound is scheme, host and port (a bare host means 443 for https,\n"
+            "    80 for http); requests naming any other model server are refused"
         )
     else:
         model_line = (
             "  and to: the model server address your deployment names per request -\n"
             "    a machine on this network, set in your deployment's Settings\n"
-            "    (bound this with --model-host to refuse every other address)"
+            "    (bound this with --model-host HOST[:PORT] to refuse every other\n"
+            "    scheme, host and port)"
         )
     return (
         "model-connector egress:\n"
@@ -187,11 +189,16 @@ def model_url_refusal(
     (--allow-plain-http-model-url), never a Settings field.
 
     ``allowed_hosts`` is the operator's bound on where this process will
-    forward (--model-host, lowercased). The deployment names the address,
-    but the box's operator names the network: a compromised platform must
-    not gain a request-maker that can reach anything the box can. Empty
-    means the operator declined to bound it - the flag is the boundary, and
-    it lives in argv, never in anything the relay sends."""
+    forward (--model-host): each entry a lowercased ``host`` or
+    ``host:port``, an IPv6 literal in its brackets. A bare host covers only
+    its scheme's default port (443 https, 80 http), so the bound is scheme,
+    host and port: a request-maker bounded to a host alone could still reach
+    every service on that box, with the body the relay chose. The deployment
+    names the address, but the box's operator names the network: a
+    compromised platform must not gain a request-maker that can reach
+    anything the box can. Empty means the operator declined to bound it -
+    the flag is the boundary, and it lives in argv, never in anything the
+    relay sends."""
     if not model_url:
         return (
             "the deployment did not name a model server for this request - set its "
@@ -200,12 +207,37 @@ def model_url_refusal(
     m = urlsplit(model_url)
     if m.scheme not in ("http", "https"):
         return f"the model server address must be http(s) (got {model_url!r})"
-    if allowed_hosts and (m.hostname or "").lower() not in allowed_hosts:
+    # A model server's base address is scheme, host, port and path, and
+    # nothing else has a meaning here: a query or fragment marks an address
+    # that is not a server's base (checked on the raw text, because an empty
+    # one parses away and that it was there is the finding), and credentials
+    # in an address field would be sent with every request. Each is refused
+    # rather than guessed at.
+    if "?" in model_url or "#" in model_url or "@" in m.netloc:
         return (
-            f"this connector only forwards to {', '.join(sorted(allowed_hosts))} "
-            f"(--model-host); the request named {m.hostname!r}"
+            "the model server address must be scheme, host, port and path only - no "
+            f"query, fragment or credentials (got {model_url!r})"
         )
-    if m.scheme == "http" and (m.hostname or "") not in tls.LOOPBACK_HOSTS and not allow_plain:
+    host = m.hostname or ""
+    if not host:
+        return f"the model server address names no host (got {model_url!r})"
+    try:
+        port = m.port
+    except ValueError:
+        return f"the model server address has an invalid port (got {model_url!r})"
+    default_port = 443 if m.scheme == "https" else 80
+    if port is None:
+        port = default_port
+    if allowed_hosts:
+        key = f"[{host}]" if ":" in host else host
+        named = f"{key}:{port}"
+        if named not in allowed_hosts and not (key in allowed_hosts and port == default_port):
+            return (
+                f"this connector only forwards to {', '.join(sorted(allowed_hosts))} "
+                "(--model-host; a bare host means its scheme's default port); the request "
+                f"named {named}"
+            )
+    if m.scheme == "http" and host not in tls.LOOPBACK_HOSTS and not allow_plain:
         return (
             f"plain http to {m.hostname!r} would send documents across your network "
             "unencrypted; use https, or start the connector with "
@@ -214,12 +246,24 @@ def model_url_refusal(
     return None
 
 
+def _endpoint(model_url: str, suffix: str) -> str:
+    """The model server's endpoint for one job: ``suffix`` joined onto the
+    PATH of the split address. Joined onto the raw text, a ``#`` or ``?`` at
+    the end of what the relay sent would make the suffix a fragment or a
+    query and land the request on exactly the path the relay named.
+    model_url_refusal turns those addresses away before a job gets here;
+    the join is still by parts, because a builder that trusts its caller is
+    one changed call site from that request."""
+    m = urlsplit(model_url)
+    return urlunsplit((m.scheme, m.netloc, m.path.rstrip("/") + suffix, "", ""))
+
+
 def call_model(model_url: str, payload: dict, timeout: float = 290.0) -> dict:
     """Forward one job to the local model server; failures come back as a
     typed error body, never an exception - the relay forwards it to the
     engine, which already knows how to say 'the model endpoint failed'."""
-    req = urllib.request.Request(  # noqa: S310 - scheme constrained by validate_urls
-        model_url.rstrip("/") + "/chat/completions",
+    req = urllib.request.Request(  # noqa: S310 - scheme constrained by model_url_refusal
+        _endpoint(model_url, "/chat/completions"),
         data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"},
     )
@@ -270,8 +314,8 @@ def list_models(model_url: str, timeout: float = 10.0) -> dict:
     way to a screen. This answers a job of kind "models" - the deployment's
     question "what does this box serve?", asked before anyone picks."""
     try:
-        with _opener.open(  # noqa: S310 - scheme constrained by validate_urls; never redirects
-            model_url.rstrip("/") + "/models", timeout=timeout
+        with _opener.open(  # noqa: S310 - scheme constrained by model_url_refusal; no redirects
+            _endpoint(model_url, "/models"), timeout=timeout
         ) as resp:
             data = json.loads(tls.read_capped(resp))
     except Exception as exc:  # noqa: BLE001 - any failure becomes the typed error the relay forwards

@@ -9,8 +9,32 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from urllib.parse import urlsplit
 
 from model_connector import client, loop, pairing, tls
+
+
+def _model_host(entry: str) -> str:
+    """One --model-host entry, in the spelling model_url_refusal compares
+    against: a lowercased host, or host:port, an IPv6 literal kept in its
+    brackets. It is read as a URL authority so the bound and the job's
+    address are parsed by the same code, and anything beyond host and port
+    (a scheme, a path, credentials) is refused at the prompt: accepted, it
+    would become a host named "https" that no request ever matches, and the
+    operator would believe themselves bounded."""
+    parts = urlsplit("//" + entry)
+    try:
+        port = parts.port
+    except ValueError:
+        port = -1
+    host = parts.hostname or ""
+    key = f"[{host}]" if ":" in host else host
+    normalised = key if port is None else f"{key}:{port}"
+    if not host or port == -1 or normalised != parts.netloc.lower() or parts.path:
+        raise argparse.ArgumentTypeError(
+            f"expected HOST or HOST:PORT (an IPv6 literal in brackets), got {entry!r}"
+        )
+    return normalised
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -29,10 +53,12 @@ def main(argv: list[str] | None = None) -> int:
         "--model-host",
         action="append",
         default=[],
-        metavar="HOST",
-        help="only forward to this model server host (repeatable); requests "
-        "naming any other address are refused - your bound on where this "
-        "process will connect, independent of what the deployment sends",
+        type=_model_host,
+        metavar="HOST[:PORT]",
+        help="only forward to this model server, host[:port] (repeatable); a bare "
+        "host means the scheme's default port (443 https, 80 http), and requests "
+        "naming any other scheme, host or port are refused - your bound on where "
+        "this process will connect, independent of what the deployment sends",
     )
     p.add_argument(
         "--allow-plain-http-model-url",
@@ -59,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
     # server it is aimed at - set in the deployment's Settings beside the
     # model choice - so the model configuration lives in exactly one place.
     loop.validate_relay_url(args.relay)
-    allowed_hosts = frozenset(h.lower() for h in args.model_host if h)
+    allowed_hosts = frozenset(args.model_host)
     if args.print_egress:
         # The whole egress surface, stated by the process itself so a network
         # review can quote the tool rather than trust a document. Printed
