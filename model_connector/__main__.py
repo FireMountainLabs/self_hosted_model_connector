@@ -7,6 +7,7 @@ when a pairing does not go green - and never the token.
 from __future__ import annotations
 
 import argparse
+import http.client
 import sys
 import time
 
@@ -82,16 +83,37 @@ def main(argv: list[str] | None = None) -> int:
             "another connector is already connected with this pairing token - each "
             "connector needs its own: generate another in Settings"
         )
+    except client.ProtocolMismatch as exc:
+        return loop._die(
+            f"the relay speaks a protocol this connector does not ({loop.clean(exc)}); "
+            "update the connector"
+        )
     except client.RelayUnavailable as exc:
-        # Not revoked, so the token stays: the next start needs no paste.
-        return loop._die(f"{exc} - the pairing is kept; try again shortly")
+        # Not revoked, so the token stays: the next start needs no paste. The
+        # message is the relay's own words, so it is cleaned like any wire text.
+        return loop._die(f"{loop.clean(exc)} - the pairing is kept; try again shortly")
     except tls.Aes256Error as exc:
         return loop._die(str(exc))
     except OSError as exc:
         # A relay that cannot be reached at all - a mistyped address, no
         # network, a firewall - is the operator's problem to fix, and gets
-        # the address and the OS's reason in one line, not a stack trace.
-        return loop._die(f"could not reach the relay at {args.relay}: {exc}")
+        # the address and the OS's reason in one line, not a stack trace. An
+        # OS error echoes the address the operator typed, never wire text;
+        # cleaning it costs nothing and holds if that ever changes.
+        return loop._die(f"could not reach the relay at {args.relay}: {loop.clean(exc)}")
+    except http.client.HTTPException as exc:
+        # Something answered, but not in HTTP - a service that is not the
+        # relay, or a port that speaks another protocol. The status line it
+        # sent is wire text (BadStatusLine carries it as the message, raw
+        # line ending included), so the class names the failure and the text
+        # is cleaned and folded to one line - clean() keeps "\n" for text
+        # that is meant to span lines, which a raw status line is not.
+        # Caught after OSError: RemoteDisconnected is both, and reads better
+        # as unreachable.
+        detail = " ".join(loop.clean(exc).split())
+        return loop._die(
+            f"the relay at {args.relay} did not answer HTTP ({type(exc).__name__}: {detail})"
+        )
     first_pairing = source.pasted
     source.remember()
     if first_pairing:
