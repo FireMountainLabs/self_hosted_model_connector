@@ -124,7 +124,8 @@ Python already carries.
   another port on the same box is refused with the rest. It is your bound
   on your network, independent of anything the deployment sends. An address
   carrying a query, a fragment or credentials is refused outright. Redirects
-  are never followed, and oversized responses are dropped unread.
+  are never followed, proxy settings in the environment and the system are
+  ignored, and oversized responses are dropped unread.
 - **Holds one secret.** The pairing token is pasted at a hidden prompt -
   never a command-line argument, which every user of the machine can read,
   and never the environment. After the relay accepts it, it is kept in a
