@@ -48,7 +48,12 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-_opener = urllib.request.build_opener(_NoRedirect)
+# The empty ProxyHandler displaces the default one, which reads http_proxy,
+# https_proxy and the system proxy settings and would send the bytes to a
+# destination the egress statement does not name and the --model-host bound
+# did not check. The relay hop reads no proxy settings either, so both hops
+# dial the address they were given.
+_opener = urllib.request.build_opener(_NoRedirect, urllib.request.ProxyHandler({}))
 
 # The most wire text one terminal line may carry: a relay must not be able
 # to fill the operator's scrollback with a multi-megabyte job id or message.
@@ -195,7 +200,8 @@ def egress_facts(relay: str, allowed_hosts: frozenset[str] = frozenset()) -> str
         f"  dials out to: {host} port {port} {transport}\n"
         f"{model_line}\n"
         "  listens on: nothing - this process opens no inbound sockets, ever\n"
-        "  no other destinations, and redirects are never followed"
+        "  no other destinations, and redirects are never followed; proxy settings\n"
+        "    in the environment and the system are ignored"
     )
 
 
