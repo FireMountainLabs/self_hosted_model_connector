@@ -57,6 +57,29 @@ the platform cannot be reached - when your access to it has been severed,
 or it is down - but it is only that half: the token stays valid on the
 platform until someone revokes it in Settings.
 
+### Two connectors on one machine
+
+Each connector still needs its own token, and on a machine that already
+runs one the second needs its own pairing run too: started plainly, it
+would load the token saved for that relay - the first connector's, in
+use - be answered busy, and say so, naming the file. Generate a second
+token in Settings and start the second connector with `--pair`:
+
+```bash
+python3 <the downloaded file> --relay https://<your relay> --pair
+```
+
+`--pair` ignores the saved token and asks for a paste. Once the relay
+accepts it, the new token is remembered **in place of** the previous one:
+the pairing file holds one token per relay address, so two connectors to
+the same relay under the same account share that one slot. The first
+connector keeps running - it holds its token in memory - but a connector
+started later under this account *without* `--pair` (a reboot, a service
+manager's restart) pairs with the newest saved token, and only one of the
+two comes back on its own. If both must survive restarts, run the second
+connector under a different user account, or with its own
+`XDG_CONFIG_HOME` (`APPDATA` on Windows) so it keeps its own pairing file.
+
 From a checkout of this repository, the same program runs as
 `python3 -m model_connector` with the same flags.
 
