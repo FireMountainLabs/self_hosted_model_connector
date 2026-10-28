@@ -21,10 +21,13 @@ python3 <the downloaded file> --relay https://<your relay>
 
 It asks for the pairing token, with input hidden - paste it from the token
 page. Once the relay has accepted it, the token is remembered on this
-machine in a file only your account can read
-(`~/.config/model-connector/pairings.json`; `%APPDATA%\model-connector\`
-on Windows), so every later start - a reboot, a service manager's restart -
-pairs on its own with nobody at a terminal. The pairing lasts until
+machine (`~/.config/model-connector/pairings.json`;
+`%APPDATA%\model-connector\` on Windows), so every later start - a reboot,
+a service manager's restart - pairs on its own with nobody at a terminal.
+On Linux and macOS the file is owner-only (`0600` in a `0700` directory);
+on Windows it carries the profile folder's own permissions (your account,
+SYSTEM and Administrators by default) and nothing stronger is set. The
+pairing lasts until
 someone revokes the token in your deployment's Settings; then the
 connector stops, says so, and forgets the token (see
 `docs/stored-pairing-spec.md`).

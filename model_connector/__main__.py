@@ -146,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
     if first_pairing:
         print(
             "model-connector: paired; the token is remembered on this machine "
-            f"(owner-only file {source.path}), so this command needs no "
+            f"({pairing.permissions_note()} {source.path}), so this command needs no "
             "paste from now on"
         )
     print(
