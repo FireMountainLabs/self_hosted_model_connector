@@ -63,6 +63,47 @@ From a checkout of this repository, the same program runs as
 Python 3.12 or newer. A signed container image with a software bill of
 materials is also published, for machines without Python.
 
+## Installing as a package
+
+A deployment that ships the connector pins this repository at a commit and
+installs the GitHub archive of that commit under pip's `--require-hashes`,
+so bytes that differ from the recorded archive cannot get in. But the
+archive is a source tree, not a wheel: an installer still runs a build
+backend to copy `model_connector/` into site-packages, and in pip's default
+isolated build that backend is fetched from PyPI on the spot - the archive's
+hash never covers it. `pyproject.toml` therefore pins the backend to an
+exact version, `setuptools==84.2.1`, and a fully hash-verified install is
+two steps: install that setuptools by hash first, then install the archive
+*without* build isolation, so pip builds with the setuptools it just
+verified instead of fetching another.
+
+```bash
+printf '%s\n' \
+  'setuptools==84.2.1 --hash=sha256:ca140b45d5325a9478f880e351484f62fef15f336462e449ca0c03c873d589c2' \
+  | pip install --require-hashes -r /dev/stdin
+pip install --no-build-isolation --no-deps --require-hashes -r connector.lock
+```
+
+where `connector.lock` is one requirement, the archive of the commit you
+chose and its sha256:
+
+```
+self-hosted-model-connector @ https://github.com/FireMountainLabs/self_hosted_model_connector/archive/<commit>.tar.gz \
+    --hash=sha256:<sha256 of that archive>
+```
+
+pip reads a `--hash` only from a requirements file, hence the first line's
+`-r /dev/stdin`; a one-line file does the same where there is no `/dev/stdin`.
+The sha256 above is that of the `setuptools-84.2.1-py3-none-any.whl` on
+PyPI, and the test suite holds this section to the version `pyproject.toml`
+pins, so the two cannot drift. Without `--no-build-isolation` pip builds in
+a fresh environment and fetches setuptools from PyPI with no hash, pinned
+version or not, and the whole exercise verifies the archive but not what
+installed it. With it, these two lines are the complete transitive surface:
+the connector has no dependencies, and neither does that setuptools wheel.
+The one thing left unverified by them is pip itself, which is whatever your
+Python already carries.
+
 ## What it does, and does not, do
 
 - **Dials out only.** The connector long-polls your deployment's relay over

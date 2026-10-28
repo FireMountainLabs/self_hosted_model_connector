@@ -1,7 +1,11 @@
 # The connector as an installable package: deployments that ship it pin this
 # repository at a commit, so what a tenant runs is verifiably this tree.
+# The backend is pinned exactly, not floored: a consumer that verifies the
+# archive by hash must also be able to verify the one tool that unpacks it,
+# and pip's isolated build would otherwise fetch whatever version a floor
+# allows, with no hash (README, "Installing as a package").
 [build-system]
-requires = ["setuptools>=69"]
+requires = ["setuptools==84.2.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
