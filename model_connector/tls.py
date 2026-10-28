@@ -160,7 +160,10 @@ def https_post_json(
         raw = read_capped(resp)
         try:
             parsed = json.loads(raw) if raw else {}
-        except ValueError:
+        except (ValueError, RecursionError):
+            # A body nested deeper than the parser can follow is malformed
+            # like any other: the peer must not be able to crash this process
+            # with brackets.
             parsed = {}
         if not isinstance(parsed, dict):
             parsed = {}
