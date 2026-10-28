@@ -179,10 +179,15 @@ class RelayClient:
 
     # ----------------------------------------------------------------- verbs
     def poll(self, declare: dict) -> dict | None:
+        return self.poll_reply(declare).get("job")
+
+    def poll_reply(self, declare: dict) -> dict:
+        """The whole poll reply: ``job`` (or None), and ``poll_after`` when a
+        quiet relay asks this connector to wait before it polls again."""
         status, body = self._post(
             f"{self._relay}/connector/poll", declare, self._headers(), self._timeout
         )
-        return self._checked(status, body).get("job")
+        return self._checked(status, body)
 
     def result(self, job_id: str, body: dict) -> None:
         status, resp = self._post(
