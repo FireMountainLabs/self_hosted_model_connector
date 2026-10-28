@@ -64,8 +64,19 @@ class KeyBusy(RuntimeError):
     which needs its own token)."""
 
 
+def _error_field(body: dict, key: str) -> str:
+    """One field of the body's ``error`` object as a string, "" when absent.
+    An ``error`` that is not an object - a front door's own JSON, or a relay
+    that is not this protocol - names no code and no message; it must read
+    as neither, not as a crash while the operator is watching."""
+    error = body.get("error")
+    if not isinstance(error, dict):
+        return ""
+    return str(error.get(key) or "")
+
+
 def _body_code(body: dict) -> str:
-    return str((body.get("error") or {}).get("code") or "")
+    return _error_field(body, "code")
 
 
 class RelayClient:
@@ -119,7 +130,7 @@ class RelayClient:
                 )
             finally:
                 del token
-            message = (body.get("error") or {}).get("message") or ""
+            message = _error_field(body, "message")
             if status == 401 and _body_code(body) == "pairing_revoked":
                 raise TokenRejected("the relay rejected the pairing token")
             if status == 426:
@@ -181,12 +192,10 @@ class RelayClient:
             raise SessionExpired("the session ended; establish a new one")
         if status >= 500:
             raise RelayUnavailable(
-                (body.get("error") or {}).get("message") or f"the relay answered HTTP {status}"
+                _error_field(body, "message") or f"the relay answered HTTP {status}"
             )
         if status == 426:
-            raise ProtocolMismatch(
-                (body.get("error") or {}).get("message") or "protocol version mismatch"
-            )
+            raise ProtocolMismatch(_error_field(body, "message") or "protocol version mismatch")
         return body
 
     # ----------------------------------------------------------------- verbs
