@@ -67,6 +67,13 @@ def main(argv: list[str] | None = None) -> int:
         help="accept an unencrypted model server address on another machine "
         "(your network, your call)",
     )
+    p.add_argument(
+        "--pair",
+        action="store_true",
+        help="ignore the token saved for this relay and ask for a new one - for a "
+        "second connector on a machine that already runs one (the new token "
+        "replaces the saved one on disk; the running connector is not affected)",
+    )
     p.add_argument("--once", action="store_true", help="one poll cycle, then exit (smoke test)")
     p.add_argument(
         "--forget",
@@ -111,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
                 "platform until it is revoked in Settings, Connectors tab"
             )
         return 0
-    source = loop.make_token_source(pairing.PairingStore(args.relay))
+    source = loop.make_token_source(pairing.PairingStore(args.relay), ignore_saved=args.pair)
     relay_client = client.RelayClient(args.relay, source)
     try:
         # Establish the first session now, while the operator is watching: a
@@ -128,6 +135,19 @@ def main(argv: list[str] | None = None) -> int:
             "the pairing token was not accepted - generate a new one in Settings and pair again"
         )
     except client.KeyBusy:
+        if source.from_file:
+            # The refused token was never typed in this run: it is the one this
+            # machine saved for this relay, and the connector holding it is
+            # most likely on this same machine. An operator who has already
+            # generated a second token needs to hear that it was not used,
+            # and the flag that uses it - not "generate another" again.
+            return loop._die(
+                "another connector is already connected with the pairing token this "
+                f"machine saved for {args.relay} (in {source.path}); that saved token "
+                "was used, not a new one - each connector needs its own: generate "
+                "another in Settings and run this command again with --pair to "
+                "pair this connector with it"
+            )
         return loop._die(
             "another connector is already connected with this pairing token - each "
             "connector needs its own: generate another in Settings"
