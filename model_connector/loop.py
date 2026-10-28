@@ -50,16 +50,38 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 _opener = urllib.request.build_opener(_NoRedirect)
 
+# The most wire text one terminal line may carry: a relay must not be able
+# to fill the operator's scrollback with a multi-megabyte job id or message.
+CLEAN_MAX_CHARS = 2000
+_CUT_MARKER = "..."
+
 
 def clean(text: object) -> str:
     """Text that originated on the wire, made safe for a terminal: a hostile
     relay must not be able to rewrite what the operator sees (or spoof the
-    egress statement) with escape sequences."""
-    return "".join(ch if ch >= " " and ch != "\x7f" or ch == "\n" else " " for ch in str(text))
+    egress statement) with escape sequences, nor flood the screen.
+
+    Every C0 control and DEL becomes a space, and so does the C1 range
+    (U+0080 to U+009F): some terminals read U+009B as CSI and U+009D as OSC,
+    the 8-bit spellings of the ESC sequences. A newline is kept. The result
+    is at most CLEAN_MAX_CHARS long, ending in a marker when it was cut."""
+    text = str(text)
+    cut = len(text) > CLEAN_MAX_CHARS
+    if cut:
+        # Cut before the sweep: every character maps to exactly one, so the
+        # length is the same either side, and the sweep stays bounded.
+        text = text[: CLEAN_MAX_CHARS - len(_CUT_MARKER)]
+    safe = "".join(
+        ch if (ch >= " " and ch != "\x7f" and not "\x80" <= ch <= "\x9f") or ch == "\n" else " "
+        for ch in text
+    )
+    return safe + _CUT_MARKER if cut else safe
 
 
 def _die(message: str) -> NoReturn:
-    print(f"model-connector: {message}", file=sys.stderr)
+    # Every refusal passes through clean, whatever composed it: a message that
+    # quotes the relay's words raw must still not reach the terminal raw.
+    print(f"model-connector: {clean(message)}", file=sys.stderr)
     raise SystemExit(2)
 
 
