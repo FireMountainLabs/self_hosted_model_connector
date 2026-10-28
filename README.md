@@ -54,10 +54,14 @@ materials is also published, for machines without Python.
   machine unless you explicitly acknowledge it
   (`--allow-plain-http-model-url`).
 - **Forwards only where you allow.** Each request names the model server it
-  is aimed at (set in your deployment's Settings). Pass `--model-host`
-  (repeatable) and the connector refuses to forward anywhere else - your
-  bound on your network, independent of anything the deployment sends.
-  Redirects are never followed, and oversized responses are dropped unread.
+  is aimed at (set in your deployment's Settings). Pass `--model-host
+  HOST[:PORT]` (repeatable) and the connector refuses to forward anywhere
+  else: the bound is scheme, host and port - a bare host covers only its
+  scheme's default port (443 for https, 80 for http), so a request naming
+  another port on the same box is refused with the rest. It is your bound
+  on your network, independent of anything the deployment sends. An address
+  carrying a query, a fragment or credentials is refused outright. Redirects
+  are never followed, and oversized responses are dropped unread.
 - **Holds one secret.** The pairing token is pasted at a hidden prompt -
   never a command-line argument, which every user of the machine can read,
   and never the environment. After the relay accepts it, it is kept in a
