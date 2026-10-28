@@ -105,11 +105,19 @@ class TokenSource:
     A pasted token reaches disk only through ``remember()``, which the caller
     invokes after the relay has accepted it - a mistyped paste must not be
     remembered. ``forget()`` is the revocation path: the relay refused the
-    token, so it leaves memory and disk together."""
+    token, so it leaves memory and disk together.
 
-    def __init__(self, store: pairing.PairingStore) -> None:
+    ``ignore_saved`` is the second-connector path: a machine that already
+    holds a token for this relay has it in use by the first connector, so
+    the stored token would only earn a busy answer, and the operator is asked
+    for the new one instead. On acceptance ``remember()`` writes it over the
+    stored one - the file holds one token per relay - which is why the first
+    connector, holding its own token in memory, keeps running."""
+
+    def __init__(self, store: pairing.PairingStore, *, ignore_saved: bool = False) -> None:
         self._store = store
-        self._token: str | None = store.load()
+        self._token: str | None = None if ignore_saved else store.load()
+        self._from_file = self._token is not None
         self.pasted = False
 
     def __call__(self) -> str:
@@ -134,6 +142,13 @@ class TokenSource:
         operator so."""
         return str(self._store.path)
 
+    @property
+    def from_file(self) -> bool:
+        """True while the token in hand is the one loaded from the store:
+        a refusal of that token is a refusal of something the operator never
+        typed in this run, and the message has to say where it came from."""
+        return self._from_file and self._token is not None
+
     def remember(self) -> None:
         if self.pasted and self._token:
             self._store.save(self._token)
@@ -145,8 +160,10 @@ class TokenSource:
         self._store.forget()
 
 
-def make_token_source(store: pairing.PairingStore) -> TokenSource:
-    return TokenSource(store)
+def make_token_source(
+    store: pairing.PairingStore, *, ignore_saved: bool = False
+) -> TokenSource:
+    return TokenSource(store, ignore_saved=ignore_saved)
 
 
 def _interactive() -> bool:
